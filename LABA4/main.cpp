@@ -11,7 +11,7 @@ int main() {
     MessageBox(nullptr, L"Программа запущена!", L"Отладка", MB_OK);
 
     try {
-        Window window(L"My Game Window", 800, 600);
+        Window window(L"My Cube", 800, 600);
         int exitCode = window.Run();
         std::cout << "\nApplication exited with code: " << exitCode << std::endl;
     }

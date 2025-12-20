@@ -4,7 +4,9 @@
 #include <dxgi.h>
 #include <DirectXMath.h>
 #include <iostream>
-#include "InputDevice.h"
+
+#define WINVER 0x0A00
+#define _WIN32_WINNT 0x0A00
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -13,6 +15,9 @@
 using namespace DirectX;
 
 Window* Window::currentInstance = nullptr;
+
+constexpr float Window::mouseSensitivity;
+constexpr float Window::cameraSpeed;
 
 struct Vertex {
     XMFLOAT3 pos;
@@ -23,7 +28,7 @@ struct Vertex {
 struct ConstantBuffer {
     XMMATRIX worldViewProjection;
     XMMATRIX world;
-    XMFLOAT3 lightPos;
+    XMFLOAT3 lightDir;
     float padding1;
     XMFLOAT3 cameraPos;
     float padding2;
@@ -39,12 +44,10 @@ Window::Window(const std::wstring& title, int width, int height)
     }
     currentInstance = this;
     SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-
     InitializeDirectX();
 }
 
 Window::~Window() {
-    // Освобождение DX11 ресурсов
     if (vertexBuffer) vertexBuffer->Release();
     if (indexBuffer) indexBuffer->Release();
     if (constantBuffer) constantBuffer->Release();
@@ -60,10 +63,7 @@ Window::~Window() {
     if (swapChain) swapChain->Release();
     if (d3dContext) d3dContext->Release();
     if (d3dDevice) d3dDevice->Release();
-
-    if (hwnd) {
-        DestroyWindow(hwnd);
-    }
+    if (hwnd) DestroyWindow(hwnd);
 }
 
 void Window::RegisterWindowClass() {
@@ -71,14 +71,10 @@ void Window::RegisterWindowClass() {
     wcex.cbSize = sizeof(WNDCLASSEXW);
     wcex.style = CS_HREDRAW | CS_VREDRAW;
     wcex.lpfnWndProc = WndProc;
-    wcex.cbClsExtra = 0;
-    wcex.cbWndExtra = 0;
     wcex.hInstance = GetModuleHandle(nullptr);
-    wcex.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wcex.lpszClassName = L"MyAppWindowClass";
-
     if (!RegisterClassExW(&wcex)) {
         throw std::runtime_error("Failed to register window class.");
     }
@@ -87,20 +83,12 @@ void Window::RegisterWindowClass() {
 HWND Window::CreateNativeWindow() {
     RECT rect = { 0, 0, windowWidth, windowHeight };
     AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
-
     HWND hWnd = CreateWindowExW(
-        0,
-        L"MyAppWindowClass",
-        windowTitle.c_str(),
-        WS_OVERLAPPEDWINDOW,
+        0, L"MyAppWindowClass", windowTitle.c_str(), WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
-        rect.right - rect.left,
-        rect.bottom - rect.top,
-        nullptr, nullptr,
-        GetModuleHandle(nullptr),
-        nullptr
+        rect.right - rect.left, rect.bottom - rect.top,
+        nullptr, nullptr, GetModuleHandle(nullptr), nullptr
     );
-
     if (hWnd) {
         ShowWindow(hWnd, SW_SHOW);
         UpdateWindow(hWnd);
@@ -110,31 +98,14 @@ HWND Window::CreateNativeWindow() {
 
 void Window::InitializeDirectX() {
     D3D_FEATURE_LEVEL featureLevel;
-    HRESULT hr = D3D11CreateDevice(
-        nullptr,
-        D3D_DRIVER_TYPE_HARDWARE,
-        nullptr,
-        D3D11_CREATE_DEVICE_DEBUG, 
-        nullptr,
-        0,
-        D3D11_SDK_VERSION,
-        &d3dDevice,
-        &featureLevel,
-        &d3dContext
-    );
+    UINT createDeviceFlags = 0;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        createDeviceFlags, nullptr, 0, D3D11_SDK_VERSION,
+        &d3dDevice, &featureLevel, &d3dContext);
     if (FAILED(hr)) {
-        hr = D3D11CreateDevice(
-            nullptr,
-            D3D_DRIVER_TYPE_WARP,
-            nullptr,
-            0,
-            nullptr,
-            0,
-            D3D11_SDK_VERSION,
-            &d3dDevice,
-            &featureLevel,
-            &d3dContext
-        );
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+            0, nullptr, 0, D3D11_SDK_VERSION,
+            &d3dDevice, &featureLevel, &d3dContext);
         if (FAILED(hr)) {
             throw std::runtime_error("Failed to create D3D11 device.");
         }
@@ -159,15 +130,9 @@ void Window::InitializeDirectX() {
     dxgiDevice->GetParent(__uuidof(IDXGIAdapter), (void**)&dxgiAdapter);
     IDXGIFactory* dxgiFactory = nullptr;
     dxgiAdapter->GetParent(__uuidof(IDXGIFactory), (void**)&dxgiFactory);
-
     hr = dxgiFactory->CreateSwapChain(d3dDevice, &sd, &swapChain);
-    dxgiDevice->Release();
-    dxgiAdapter->Release();
-    dxgiFactory->Release();
-
-    if (FAILED(hr)) {
-        throw std::runtime_error("Failed to create swap chain.");
-    }
+    dxgiDevice->Release(); dxgiAdapter->Release(); dxgiFactory->Release();
+    if (FAILED(hr)) throw std::runtime_error("Failed to create swap chain.");
 
     ID3D11Texture2D* backBuffer = nullptr;
     hr = swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
@@ -185,7 +150,6 @@ void Window::InitializeDirectX() {
     depthDesc.SampleDesc.Count = 1;
     depthDesc.Usage = D3D11_USAGE_DEFAULT;
     depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-
     hr = d3dDevice->CreateTexture2D(&depthDesc, nullptr, &depthStencilBuffer);
     if (FAILED(hr)) throw std::runtime_error("Failed to create depth buffer.");
     hr = d3dDevice->CreateDepthStencilView(depthStencilBuffer, nullptr, &depthStencilView);
@@ -200,16 +164,12 @@ void Window::InitializeDirectX() {
 
     worldMatrix = XMMatrixIdentity();
     viewMatrix = XMMatrixLookAtLH(
-        XMVectorSet(-3.0f, 2.0f, -5.0f, 0.0f), // камера слева, сверху и немного сзади
-        XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f),   // смотрит в центр куба
-        XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)    // вверх — не меняем
+        XMLoadFloat3(&cameraPos),
+        XMVectorAdd(XMLoadFloat3(&cameraPos), XMLoadFloat3(&cameraFront)),
+        XMLoadFloat3(&cameraUp)
     );
     projectionMatrix = XMMatrixPerspectiveFovLH(
-        XM_PIDIV4,
-        (float)windowWidth / (float)windowHeight,
-        0.1f,
-        100.0f
-    );
+        XM_PIDIV4, (float)windowWidth / (float)windowHeight, 0.1f, 100.0f);
 
     CreateShaders();
     CreateConstantBuffer();
@@ -222,29 +182,26 @@ void Window::CreateShaders() {
         cbuffer Constants : register(b0) {
             matrix WorldViewProjection;
             matrix World;
-            float3 LightPos;
+            float3 LightDir;
             float3 CameraPos;
         }
-
         struct VS_INPUT {
             float3 Pos : POSITION;
             float3 Normal : NORMAL;
-            float3 Color : COLOR;        
+            float3 Color : COLOR;
         };
-
         struct PS_INPUT {
             float4 Pos : SV_POSITION;
             float3 WorldPos : TEXCOORD0;
             float3 Normal : TEXCOORD1;
-            float3 Color : TEXCOORD2;   
+            float3 Color : TEXCOORD2;
         };
-
         PS_INPUT VS(VS_INPUT input) {
             PS_INPUT output;
             output.Pos = mul(float4(input.Pos, 1.0f), WorldViewProjection);
             output.WorldPos = mul(float4(input.Pos, 1.0f), World).xyz;
             output.Normal = mul(input.Normal, (float3x3)World);
-            output.Color = input.Color; 
+            output.Color = input.Color;
             return output;
         }
     )";
@@ -253,22 +210,19 @@ void Window::CreateShaders() {
         cbuffer Constants : register(b0) {
             matrix WorldViewProjection;
             matrix World;
-            float3 LightPos;
+            float3 LightDir;
             float3 CameraPos;
         }
-
         struct PS_INPUT {
             float4 Pos : SV_POSITION;
             float3 WorldPos : TEXCOORD0;
             float3 Normal : TEXCOORD1;
-            float3 Color : TEXCOORD2;  
+            float3 Color : TEXCOORD2;
         };
-
         float4 PS(PS_INPUT input) : SV_Target {
-            float3 lightDir = normalize(LightPos - input.WorldPos);
+            float3 lightDir = normalize(LightDir); // ✅ без минуса!
             float3 viewDir = normalize(CameraPos - input.WorldPos);
             float3 normal = normalize(input.Normal);
-
             float diffuse = max(0.0f, dot(normal, lightDir));
             float specular = 0.0f;
             float shininess = 32.0f;
@@ -276,11 +230,9 @@ void Window::CreateShaders() {
                 float3 reflectDir = reflect(-lightDir, normal);
                 specular = pow(max(0.0f, dot(viewDir, reflectDir)), shininess);
             }
-
-            float4 ambient = float4(0.05f, 0.05f, 0.05f, 1.0f);
-            float4 diffuseColor = float4(input.Color, 1.0f); 
+            float4 ambient = float4(0.15f, 0.15f, 0.15f, 1.0f);
+            float4 diffuseColor = float4(input.Color, 1.0f);
             float4 specularColor = float4(0.8f, 0.8f, 0.8f, 1.0f);
-
             return ambient + diffuse * diffuseColor + specular * specularColor;
         }
     )";
@@ -316,7 +268,6 @@ void Window::CreateShaders() {
         {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0}
     };
-
     hr = d3dDevice->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &inputLayout);
     vsBlob->Release();
     psBlob->Release();
@@ -358,31 +309,26 @@ void Window::CreateCubeGeometry() {
         { XMFLOAT3(0.5f, -0.5f, 0.5f), XMFLOAT3(0.0f, 0.0f, 1.0f), XMFLOAT3(1.0f, 0.0f, 0.0f) },
         { XMFLOAT3(0.5f, 0.5f, 0.5f), XMFLOAT3(0.0f, 0.0f, 1.0f), XMFLOAT3(1.0f, 0.0f, 0.0f) },
         { XMFLOAT3(-0.5f, 0.5f, 0.5f), XMFLOAT3(0.0f, 0.0f, 1.0f), XMFLOAT3(1.0f, 0.0f, 0.0f) },
-
         // Задняя грань 
         { XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT3(0.0f, 0.0f, -1.0f), XMFLOAT3(0.0f, 1.0f, 0.0f) },
         { XMFLOAT3(0.5f, -0.5f, -0.5f), XMFLOAT3(0.0f, 0.0f, -1.0f), XMFLOAT3(0.0f, 1.0f, 0.0f) },
         { XMFLOAT3(0.5f, 0.5f, -0.5f), XMFLOAT3(0.0f, 0.0f, -1.0f), XMFLOAT3(0.0f, 1.0f, 0.0f) },
         { XMFLOAT3(-0.5f, 0.5f, -0.5f), XMFLOAT3(0.0f, 0.0f, -1.0f), XMFLOAT3(0.0f, 1.0f, 0.0f) },
-
         // Левая 
         { XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT3(-1.0f, 0.0f, 0.0f), XMFLOAT3(0.0f, 0.0f, 1.0f) },
         { XMFLOAT3(-0.5f, -0.5f, 0.5f), XMFLOAT3(-1.0f, 0.0f, 0.0f), XMFLOAT3(0.0f, 0.0f, 1.0f) },
         { XMFLOAT3(-0.5f, 0.5f, 0.5f), XMFLOAT3(-1.0f, 0.0f, 0.0f), XMFLOAT3(0.0f, 0.0f, 1.0f) },
         { XMFLOAT3(-0.5f, 0.5f, -0.5f), XMFLOAT3(-1.0f, 0.0f, 0.0f), XMFLOAT3(0.0f, 0.0f, 1.0f) },
-
         // Правая
         { XMFLOAT3(0.5f, -0.5f, -0.5f), XMFLOAT3(1.0f, 0.0f, 0.0f), XMFLOAT3(1.0f, 1.0f, 0.0f) },
         { XMFLOAT3(0.5f, -0.5f, 0.5f), XMFLOAT3(1.0f, 0.0f, 0.0f), XMFLOAT3(1.0f, 1.0f, 0.0f) },
         { XMFLOAT3(0.5f, 0.5f, 0.5f), XMFLOAT3(1.0f, 0.0f, 0.0f), XMFLOAT3(1.0f, 1.0f, 0.0f) },
         { XMFLOAT3(0.5f, 0.5f, -0.5f), XMFLOAT3(1.0f, 0.0f, 0.0f), XMFLOAT3(1.0f, 1.0f, 0.0f) },
-
         // Верх 
         { XMFLOAT3(-0.5f, 0.5f, -0.5f), XMFLOAT3(0.0f, 1.0f, 0.0f), XMFLOAT3(0.0f, 1.0f, 1.0f) },
         { XMFLOAT3(-0.5f, 0.5f, 0.5f), XMFLOAT3(0.0f, 1.0f, 0.0f), XMFLOAT3(0.0f, 1.0f, 1.0f) },
         { XMFLOAT3(0.5f, 0.5f, 0.5f), XMFLOAT3(0.0f, 1.0f, 0.0f), XMFLOAT3(0.0f, 1.0f, 1.0f) },
         { XMFLOAT3(0.5f, 0.5f, -0.5f), XMFLOAT3(0.0f, 1.0f, 0.0f), XMFLOAT3(0.0f, 1.0f, 1.0f) },
-
         // Низ 
         { XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT3(0.0f, -1.0f, 0.0f), XMFLOAT3(1.0f, 0.0f, 1.0f) },
         { XMFLOAT3(-0.5f, -0.5f, 0.5f), XMFLOAT3(0.0f, -1.0f, 0.0f), XMFLOAT3(1.0f, 0.0f, 1.0f) },
@@ -391,12 +337,12 @@ void Window::CreateCubeGeometry() {
     };
 
     WORD indices[] = {
-        0,1,2, 0,2,3,     // перед
-        4,6,5, 4,7,6,     // зад
-        8,10,9, 8,11,10,  // лево
-        12,13,14, 12,14,15, // право
-        16,17,18, 16,18,19, // верх
-        20,22,21, 20,23,22  // низ
+        0,1,2, 0,2,3,     
+        4,6,5, 4,7,6,  
+        8,10,9, 8,11,10, 
+        12,13,14, 12,14,15,
+        16,17,18, 16,18,19, 
+        20,22,21, 20,23,22 
     };
 
     D3D11_BUFFER_DESC vbd = {};
@@ -417,16 +363,27 @@ void Window::CreateCubeGeometry() {
 }
 
 void Window::UpdateMatrices() {
+    XMVECTOR eye = XMLoadFloat3(&cameraPos);
+    XMVECTOR at = XMVectorAdd(eye, XMLoadFloat3(&cameraFront));
+    XMVECTOR up = XMLoadFloat3(&cameraUp);
 
-    worldMatrix = XMMatrixIdentity();
+    viewMatrix = XMMatrixLookAtLH(eye, at, up);
 
-    XMMATRIX wvp = worldMatrix * viewMatrix * projectionMatrix;
+    projectionMatrix = XMMatrixPerspectiveFovLH(
+        XM_PIDIV4,
+        static_cast<float>(windowWidth) / static_cast<float>(windowHeight),
+        0.1f,
+        100.0f
+    );
+
+    XMMATRIX world = XMMatrixIdentity();
+    XMMATRIX wvp = world * viewMatrix * projectionMatrix;
 
     ConstantBuffer cb;
     cb.worldViewProjection = XMMatrixTranspose(wvp);
-    cb.world = XMMatrixTranspose(worldMatrix);
-    cb.lightPos = XMFLOAT3(1.0f, 1.0f, -1.0f);
-    cb.cameraPos = XMFLOAT3(0.0f, 0.0f, -5.0f);
+    cb.world = XMMatrixTranspose(world);
+    cb.lightDir = XMFLOAT3(-0.7f, 1.0f, -0.5f); 
+    cb.cameraPos = cameraPos;
 
     D3D11_MAPPED_SUBRESOURCE mapped;
     d3dContext->Map(constantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
@@ -435,13 +392,47 @@ void Window::UpdateMatrices() {
 }
 
 void Window::RenderFrame() {
+    const float deltaTime = 1.0f / 60.0f;
+    const float velocity = cameraSpeed * deltaTime;
 
-    static int frameCount = 0;
-    if (++frameCount % 60 == 0) { 
-        std::cout << "RenderFrame called. Frame: " << frameCount << std::endl;
+    XMFLOAT3 frontHoriz(cameraFront.x, 0.0f, cameraFront.z);
+    XMVECTOR frontNorm = XMVector3Normalize(XMLoadFloat3(&frontHoriz));
+    XMFLOAT3 front;
+    XMStoreFloat3(&front, frontNorm);
+
+    XMVECTOR rightVec = XMVector3Cross(XMLoadFloat3(&front), XMLoadFloat3(&cameraUp));
+    XMFLOAT3 right;
+    XMStoreFloat3(&right, rightVec);
+
+    if (GetAsyncKeyState('W') & 0x8000) {
+        cameraPos.x += front.x * velocity;
+        cameraPos.z += front.z * velocity;
+    }
+    if (GetAsyncKeyState('S') & 0x8000) {
+        cameraPos.x -= front.x * velocity;
+        cameraPos.z -= front.z * velocity;
+    }
+    if (GetAsyncKeyState('A') & 0x8000) {
+        cameraPos.x -= right.x * velocity;
+        cameraPos.z -= right.z * velocity;
+    }
+    if (GetAsyncKeyState('D') & 0x8000) {
+        cameraPos.x += right.x * velocity;
+        cameraPos.z += right.z * velocity;
+    }
+    if (GetAsyncKeyState(VK_SPACE) & 0x8000) {
+        cameraPos.y += velocity;
+    }
+    if (GetAsyncKeyState(VK_LSHIFT) & 0x8000 || GetAsyncKeyState(VK_RSHIFT) & 0x8000) {
+        cameraPos.y -= velocity;
     }
 
-    float clearColor[4] = { 0.0f, 0.3f, 0.6f, 0.9f }; // тёмно-голубой
+    static int frameCount = 0;
+    if (++frameCount % 60 == 0) {
+        std::cout << "Frame: " << frameCount << std::endl;
+    }
+
+    float clearColor[4] = { 0.0f, 0.1f, 0.2f, 1.0f };
     d3dContext->ClearRenderTargetView(renderTargetView, clearColor);
     d3dContext->ClearDepthStencilView(depthStencilView, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 
@@ -463,13 +454,7 @@ void Window::RenderFrame() {
     d3dContext->PSSetConstantBuffers(0, 1, &constantBuffer);
 
     UpdateMatrices();
-
-    assert(vertexBuffer != nullptr);
-    assert(indexBuffer != nullptr);
-    assert(constantBuffer != nullptr);
-
     d3dContext->DrawIndexed(36, 0, 0);
-
     swapChain->Present(1, 0);
 }
 
@@ -484,11 +469,7 @@ int Window::Run() {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-
-        if (InputDevice::IsKeyDown(VK_ESCAPE)) {
-            RequestExit();
-        }
-
+        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) RequestExit();
         RenderFrame();
     }
     return exitCode;
@@ -516,13 +497,66 @@ LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         case WM_CLOSE:
             pThis->RequestExit();
             return 0;
-        case WM_INPUT:
-            InputDevice::ProcessRawInput(lParam);
+
+        case WM_LBUTTONDOWN: {
+            ShowCursor(FALSE);
+            pThis->mouseCaptured = true;
+            pThis->firstMouse = true; 
+
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+            POINT center = { rect.left + (rect.right - rect.left) / 2,
+                             rect.top + (rect.bottom - rect.top) / 2 };
+            ClientToScreen(hwnd, &center);
+            SetCursorPos(center.x, center.y);
             break;
+        }
+
+        case WM_LBUTTONUP: {
+            ShowCursor(TRUE);
+            pThis->mouseCaptured = false;
+            break;
+        }
+
+        case WM_MOUSEMOVE: {
+            if (pThis->mouseCaptured) {
+                POINT currentPos;
+                GetCursorPos(&currentPos);
+                ScreenToClient(hwnd, &currentPos);
+
+                RECT rect;
+                GetClientRect(hwnd, &rect);
+                float centerX = static_cast<float>(rect.left + (rect.right - rect.left) / 2);
+                float centerY = static_cast<float>(rect.top + (rect.bottom - rect.top) / 2);
+
+                float xoffset = static_cast<float>(currentPos.x) - centerX;
+                float yoffset = static_cast<float>(currentPos.y) - centerY; 
+
+                POINT center = { static_cast<LONG>(centerX), static_cast<LONG>(centerY) };
+                ClientToScreen(hwnd, &center);
+                SetCursorPos(center.x, center.y);
+
+                xoffset *= pThis->mouseSensitivity;
+                yoffset *= pThis->mouseSensitivity;
+
+                float yaw = atan2f(pThis->cameraFront.z, pThis->cameraFront.x) + xoffset;
+                float lenXZ = sqrtf(pThis->cameraFront.x * pThis->cameraFront.x + pThis->cameraFront.z * pThis->cameraFront.z);
+                float pitch = atan2f(pThis->cameraFront.y, lenXZ) + yoffset;
+
+                // Ограничение pitch
+                if (pitch > XM_PIDIV2 - 0.01f) pitch = XM_PIDIV2 - 0.01f;
+                if (pitch < -XM_PIDIV2 + 0.01f) pitch = -XM_PIDIV2 + 0.01f;
+
+                pThis->cameraFront.x = cosf(pitch) * cosf(yaw);
+                pThis->cameraFront.y = sinf(pitch);
+                pThis->cameraFront.z = cosf(pitch) * sinf(yaw);
+            }
+            break;
+        }
+
         default:
             break;
         }
     }
-
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
