@@ -1,7 +1,9 @@
-#include "Renderer.h"
+﻿#include "Renderer.h"
 #include <stdexcept>
 #include <cassert>
 #include <cmath>
+#include "InputDevice.h"
+
 static void ThrowIfFailed(HRESULT hr)
 {
 	if (FAILED(hr)) throw std::runtime_error("DirectX call failed");
@@ -62,6 +64,7 @@ void Renderer::CreateDevice()
 		ThrowIfFailed(D3D12CreateDevice(nullptr,
 			D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device)));
 }
+
 void Renderer::CreateCommandObjects()
 {
 	D3D12_COMMAND_QUEUE_DESC q{};
@@ -74,6 +77,7 @@ void Renderer::CreateCommandObjects()
 		0, D3D12_COMMAND_LIST_TYPE_DIRECT,
 		m_cmdAllocators[0].Get(), nullptr, IID_PPV_ARGS(&m_cmdList)));
 }
+
 void Renderer::CreateSwapChain(HWND hwnd, int width, int height)
 {
 	DXGI_SWAP_CHAIN_DESC1 sc{};
@@ -89,6 +93,7 @@ void Renderer::CreateSwapChain(HWND hwnd, int width, int height)
 	ThrowIfFailed(sc1.As(&m_swapChain));
 	m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
 }
+
 void Renderer::CreateDescriptorHeaps()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC rtvD{};
@@ -108,6 +113,7 @@ void Renderer::CreateDescriptorHeaps()
 	m_cbvSrvDescSize = m_device->GetDescriptorHandleIncrementSize(
 		D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 }
+
 void Renderer::CreateRenderTargetViews()
 {
 	CD3DX12_CPU_DESCRIPTOR_HANDLE h(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
@@ -118,6 +124,7 @@ void Renderer::CreateRenderTargetViews()
 		h.Offset(1, m_rtvDescSize);
 	}
 }
+
 void Renderer::CreateDepthStencilView()
 {
 	D3D12_RESOURCE_DESC d{};
@@ -136,6 +143,7 @@ void Renderer::CreateDepthStencilView()
 	m_device->CreateDepthStencilView(m_depthStencil.Get(), nullptr,
 		m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
 }
+
 void Renderer::CreateFence()
 {
 	ThrowIfFailed(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
@@ -143,6 +151,7 @@ void Renderer::CreateFence()
 	m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 	if (!m_fenceEvent) ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
 }
+
 void Renderer::CompileShaders()
 {
 	UINT flags = 0;
@@ -163,6 +172,7 @@ void Renderer::CompileShaders()
 		ThrowIfFailed(hr);
 	}
 }
+
 void Renderer::CreateRootSignature()
 {
 	CD3DX12_DESCRIPTOR_RANGE srvRange;
@@ -188,6 +198,7 @@ void Renderer::CreateRootSignature()
 		0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
 		IID_PPV_ARGS(&m_rootSignature)));
 }
+
 void Renderer::CreatePipelineStateObject()
 {
 	D3D12_INPUT_ELEMENT_DESC layout[] =
@@ -292,6 +303,22 @@ void Renderer::CreateConstantBuffer()
 		&hp, D3D12_HEAP_FLAG_NONE, &rd,
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_constantBuffer)));
 	m_constantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&m_cbMapped));
+}
+
+float Renderer::GetVerticalAngle() const
+{
+	XMVECTOR eye = XMLoadFloat3(&m_eye);
+	XMVECTOR target = XMLoadFloat3(&m_target);
+	XMVECTOR viewDir = XMVector3Normalize(target - eye);
+
+	XMFLOAT3 dir;
+	XMStoreFloat3(&dir, viewDir);
+
+	float horizLength = sqrtf(dir.x * dir.x + dir.z * dir.z);
+
+	float angle = atan2f(dir.y, horizLength);
+
+	return angle;
 }
 
 bool Renderer::LoadObj(const std::string& path)
@@ -403,56 +430,91 @@ void Renderer::BeginFrame(const float clearColor[4])
 void Renderer::DrawScene(float totalTime, float /*dt*/)
 {
 	if (!m_pso || m_subsets.empty()) return;
+
 	m_cmdList->SetPipelineState(m_pso.Get());
 	m_cmdList->SetGraphicsRootSignature(m_rootSignature.Get());
+
 	ID3D12DescriptorHeap* heaps[] = { m_cbvSrvHeap.Get() };
 	m_cmdList->SetDescriptorHeaps(1, heaps);
+
 	m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	m_cmdList->IASetVertexBuffers(0, 1, &m_vbView);
 	m_cmdList->IASetIndexBuffer(&m_ibView);
+
 	XMMATRIX world = XMMatrixIdentity();
 	XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
 	float aspect = (float)m_width / (float)m_height;
 	XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), aspect, 0.1f, 10000.f);
 	XMMATRIX wit = XMMatrixTranspose(XMMatrixInverse(nullptr, world));
+
+	float verticalAngle = GetVerticalAngle();
+
+	float t = (verticalAngle / XM_PIDIV2 + 1.0f) * 0.5f;
+
+	t = max(0.0f, min(1.0f, t));
+
+	t = powf(t, 1.5f); 
+
+	float minSpeed = 0.2f;  
+	float maxSpeed = 3.0f;   
+
+	float speedMultiplier = minSpeed + (maxSpeed - minSpeed) * t;
+
 	UINT numSubsets = (UINT)m_subsets.size();
+
 	for (UINT subIdx = 0; subIdx < numSubsets; ++subIdx)
 	{
 		const MeshSubset& sub = m_subsets[subIdx];
 		if (sub.indexCount == 0) continue;
-		int matIdx = (sub.materialIdx >= 0 && sub.materialIdx < (int)m_gpuMaterials.size()) ? sub.materialIdx : 0;
+
+		int matIdx = (sub.materialIdx >= 0 && sub.materialIdx < (int)m_gpuMaterials.size())
+			? sub.materialIdx : 0;
 		const GpuMaterial& mat = m_gpuMaterials.empty() ? GpuMaterial{} : m_gpuMaterials[matIdx];
+
 		UINT slotIdx = m_frameIndex * Renderer::MAX_SUBSETS + (subIdx % Renderer::MAX_SUBSETS);
 		UINT8* slotPtr = reinterpret_cast<UINT8*>(m_cbMapped) + slotIdx * m_cbSlotSize;
-		D3D12_GPU_VIRTUAL_ADDRESS cbAddr = m_constantBuffer->GetGPUVirtualAddress() + slotIdx * m_cbSlotSize;
+		D3D12_GPU_VIRTUAL_ADDRESS cbAddr = m_constantBuffer->GetGPUVirtualAddress()
+			+ slotIdx * m_cbSlotSize;
+
 		ConstantBufferData cb{};
+
 		XMStoreFloat4x4(&cb.World, XMMatrixTranspose(world));
 		XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
 		XMStoreFloat4x4(&cb.Proj, XMMatrixTranspose(proj));
 		XMStoreFloat4x4(&cb.WorldInvTranspose, XMMatrixTranspose(wit));
+
 		cb.LightDir = { 0.3f, -1.f, 0.5f, 0.f };
 		cb.LightColor = { 1.f, 1.f, 1.f, 1.f };
 		cb.AmbientColor = { 0.25f, 0.25f, 0.3f, 1.f };
 		cb.EyePos = { m_eye.x, m_eye.y, m_eye.z, 1.f };
+
 		cb.MaterialDiffuse = mat.diffuse;
 		cb.MaterialSpecular = mat.specular;
 		cb.SpecularPower = mat.shininess;
 		cb.HasTexture = mat.hasTexture ? 1 : 0;
+
 		cb.TotalTime = totalTime;
+
 		cb.TexTilingX = m_texTiling.x;
 		cb.TexTilingY = m_texTiling.y;
-		cb.TexScrollX = m_texScroll.x;
-		cb.TexScrollY = m_texScroll.y;
+
+		cb.TexScrollX = m_texScroll.x * speedMultiplier;
+		cb.TexScrollY = m_texScroll.y * speedMultiplier;
+
 		memcpy(slotPtr, &cb, sizeof(cb));
+
 		m_cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+
 		int srvIdx = (mat.hasTexture && mat.srvHeapIndex >= 0) ? mat.srvHeapIndex : 0;
 		CD3DX12_GPU_DESCRIPTOR_HANDLE srvH(
 			m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(),
 			srvIdx, m_cbvSrvDescSize);
 		m_cmdList->SetGraphicsRootDescriptorTable(1, srvH);
+
 		m_cmdList->DrawIndexedInstanced(sub.indexCount, 1, sub.indexStart, 0, 0);
 	}
 }
+
 // =====================EndFrame============================
 
 void Renderer::EndFrame()
@@ -511,4 +573,58 @@ Renderer::~Renderer()
 	if (m_constantBuffer && m_cbMapped) m_constantBuffer->Unmap(0, nullptr);
 	if (m_fenceEvent) CloseHandle(m_fenceEvent);
 	CoUninitialize();
+}
+
+void Renderer::UpdateCamera(float deltaTime, const InputDevice& input)
+{
+	float moveSpeed = m_cameraSpeed * deltaTime;
+
+	XMFLOAT3 moveDelta = { 0, 0, 0 };
+
+	if (input.IsKeyDown('W')) moveDelta.z += moveSpeed;
+	if (input.IsKeyDown('S')) moveDelta.z -= moveSpeed;
+	if (input.IsKeyDown('A')) moveDelta.x -= moveSpeed;
+	if (input.IsKeyDown('D')) moveDelta.x += moveSpeed;
+	if (input.IsKeyDown('Q')) moveDelta.y -= moveSpeed;
+	if (input.IsKeyDown('E')) moveDelta.y += moveSpeed;
+
+	if (input.MouseDX() != 0 || input.MouseDY() != 0)
+	{
+		float mouseSensitivity = 0.005f; 
+
+		m_cameraYaw += input.MouseDX() * mouseSensitivity;
+
+		m_cameraPitch += input.MouseDY() * mouseSensitivity;
+
+		if (m_cameraPitch > XM_PIDIV2 - 0.1f)
+			m_cameraPitch = XM_PIDIV2 - 0.1f;
+		if (m_cameraPitch < -XM_PIDIV2 + 0.1f)
+			m_cameraPitch = -XM_PIDIV2 + 0.1f;
+	}
+
+	float rotateSpeed = 1.0f * deltaTime;
+	if (input.IsKeyDown(VK_LEFT)) m_cameraYaw += rotateSpeed;
+	if (input.IsKeyDown(VK_RIGHT)) m_cameraYaw -= rotateSpeed;
+	if (input.IsKeyDown(VK_UP)) {
+		m_cameraPitch += rotateSpeed;
+		if (m_cameraPitch > XM_PIDIV2 - 0.1f) m_cameraPitch = XM_PIDIV2 - 0.1f;
+	}
+	if (input.IsKeyDown(VK_DOWN)) {
+		m_cameraPitch -= rotateSpeed;
+		if (m_cameraPitch < -XM_PIDIV2 + 0.1f) m_cameraPitch = -XM_PIDIV2 + 0.1f;
+	}
+
+	XMMATRIX rotationMatrix = XMMatrixRotationRollPitchYaw(m_cameraPitch, m_cameraYaw, 0);
+
+	XMVECTOR moveVector = XMLoadFloat3(&moveDelta);
+	moveVector = XMVector3TransformNormal(moveVector, rotationMatrix);
+
+	XMVECTOR eyePos = XMLoadFloat3(&m_eye);
+	eyePos = eyePos + moveVector;
+	XMStoreFloat3(&m_eye, eyePos);
+
+	XMVECTOR forward = XMVectorSet(0, 0, 1, 0);
+	forward = XMVector3TransformNormal(forward, rotationMatrix);
+	XMVECTOR targetPos = eyePos + forward;
+	XMStoreFloat3(&m_target, targetPos);
 }

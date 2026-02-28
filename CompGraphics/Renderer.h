@@ -12,6 +12,7 @@
 #include "d3dx12.h"
 #include "OBJLoader.h"
 #include "TextureLoader.h"
+#include "InputDevice.h"
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -73,6 +74,7 @@ public:
 	bool LoadObj(const std::string& path);
 	void SetTexTiling(float x, float y) { m_texTiling = { x, y }; }
 	void SetTexScroll(float x, float y) { m_texScroll = { x, y }; }
+	void UpdateCamera(float deltaTime, const InputDevice& input);
 private:
 	void CreateDevice();
 	void CreateCommandObjects();
@@ -84,8 +86,7 @@ private:
 	void CreateRootSignature();
 	void CreatePipelineStateObject();
 	void CreateCubeGeometry();
-	void UploadMeshToGpu(const std::vector<Vertex>& verts,
-		const std::vector<UINT>& indices);
+	void UploadMeshToGpu(const std::vector<Vertex>& verts, const std::vector<UINT>& indices);
 	void CreateConstantBuffer();
 	void CompileShaders();
 	void LoadMaterials(const ObjMesh& mesh, const std::string& baseDir);
@@ -130,4 +131,10 @@ private:
 	XMFLOAT3 m_target = { 0.f, 150.f, 0.f };
 	XMFLOAT3 m_up = { 0.f, 1.f, 0.f };
 	bool m_initialized = false;
+
+	float GetVerticalAngle() const;
+
+	float m_cameraSpeed = 500.0f;  
+	float m_cameraYaw = 0.0f;     
+	float m_cameraPitch = 0.0f;
 };
