@@ -843,59 +843,84 @@ void RenderingSystem::AddLight()
     if (m_lightMappedData)
     {
         float* data = reinterpret_cast<float*>(m_lightMappedData);
+        memset(m_lightMappedData, 0, 256);
 
-        memset(m_lightMappedData, 0, 192); 
+        // POINT LIGHT 0 - красный
+        data[0] = -300.0f;    // pos.x
+        data[1] = 200.0f;     // pos.y
+        data[2] = 0.0f;       // pos.z
+        data[3] = 1.0f;
+        data[4] = 1.0f;       // color.r 
+        data[5] = 0.0f;       // color.g
+        data[6] = 0.0f;       // color.b
+        data[7] = 1.0f;
+        data[8] = 5.0f;       // intensity
+        data[9] = 500.0f;     // range
+        data[10] = 1.0f;      // enabled
+        data[11] = 0.0f;
 
-        // ПЕРВЫЙ ИСТОЧНИК - красный слева
-        data[0] = -300.0f;   
-        data[1] = 200.0f;    
-        data[2] = 0.0f;     
-        data[3] = 1.0f;     
+        // POINT LIGHT 1 - зел
+        data[12] = 300.0f;    // pos.x
+        data[13] = 200.0f;    // pos.y
+        data[14] = 0.0f;      // pos.z
+        data[15] = 1.0f;
+        data[16] = 0.0f;      // color.r
+        data[17] = 1.0f;      // color.g 
+        data[18] = 0.0f;      // color.b
+        data[19] = 1.0f;
+        data[20] = 5.0f;      // intensity
+        data[21] = 500.0f;    // range
+        data[22] = 1.0f;      // enabled
+        data[23] = 0.0f;
 
-        data[4] = 1.0f;      
-        data[5] = 0.0f;     
-        data[6] = 0.0f;       
-        data[7] = 1.0f;      
+        // POINT LIGHT 2 - синий
+        data[24] = 0.0f;      // pos.x
+        data[25] = 400.0f;    // pos.y
+        data[26] = 0.0f;      // pos.z
+        data[27] = 1.0f;
+        data[28] = 0.0f;      // color.r
+        data[29] = 0.0f;      // color.g
+        data[30] = 1.0f;      // color.b 
+        data[31] = 1.0f;
+        data[32] = 5.0f;      // intensity
+        data[33] = 500.0f;    // range
+        data[34] = 1.0f;      // enabled
+        data[35] = 0.0f;
 
-        data[8] = 5.0f;      
-        data[9] = 500.0f;    
-        data[10] = 1.0f;     
-        data[11] = 0.0f;    
+        // DIRECTIONAL LIGHT - фиол
+        data[36] = 0.5f;      // dir.x
+        data[37] = -1.0f;     // dir.y
+        data[38] = 0.3f;      // dir.z
+        data[39] = 0.0f;
+        data[40] = 0.8f;      // color.r
+        data[41] = 0.2f;      // color.g
+        data[42] = 1.0f;      // color.b
+        data[43] = 1.0f;
+        data[44] = 1.0f;      // intensity
+        data[45] = 1.0f;      // enabled
+        data[46] = 0.0f;
+        data[47] = 0.0f;
 
-        // ВТОРОЙ ИСТОЧНИК - зеленый справа
-        data[12] = 300.0f;   
-        data[13] = 200.0f;   
-        data[14] = 0.0f;     
-        data[15] = 1.0f;     
-
-        data[16] = 0.0f;    
-        data[17] = 1.0f;   
-        data[18] = 0.0f;     
-        data[19] = 1.0f;     
-
-        data[20] = 5.0f;     
-        data[21] = 500.0f;   
-        data[22] = 1.0f;      
-        data[23] = 0.0f;      
-
-        // ТРЕТИЙ ИСТОЧНИК - фиолетовый в центре сверху
-        data[24] = 0.0f;     
-        data[25] = 400.0f;   
-        data[26] = 0.0f;    
-        data[27] = 1.0f;    
-
-        data[28] = 0.8f;    
-        data[29] = 0.0f;    
-        data[30] = 1.0f;     
-        data[31] = 1.0f;    
-
-        data[32] = 5.0f;    
-        data[33] = 500.0f;  
-        data[34] = 1.0f;     
-        data[35] = 0.0f;     
+        // SPOT LIGHT - ЖЕЛТЫЙ
+        data[48] = 0.0f;      // pos.x
+        data[49] = 300.0f;    // pos.y
+        data[50] = 200.0f;    // pos.z 
+        data[51] = 1.0f;
+        data[52] = 0.0f;      // dir.x
+        data[53] = -1.0f;     // dir.y 
+        data[54] = 0.0f;      // dir.z
+        data[55] = 0.0f;
+        data[56] = 1.0f;      // color.r 
+        data[57] = 1.0f;      // color.g
+        data[58] = 0.0f;      // color.b
+        data[59] = 1.0f;
+        data[60] = 8.0f;      
+        data[61] = 800.0f;    
+        data[62] = 45.0f;    
+        data[63] = 1.0f;     
 
         char buf[256];
-        sprintf_s(buf, "Three lights: RED (left), GREEN (right), PURPLE (center)\n");
+        sprintf_s(buf, "RED, GREEN, BLUE (point) + PURPLE (directional) + YELLOW (spot)\n");
         OutputDebugStringA(buf);
     }
 }
