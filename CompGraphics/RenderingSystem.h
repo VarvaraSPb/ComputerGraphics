@@ -66,19 +66,30 @@ struct GpuMaterial
 
 struct PointLight
 {
-    float position[3];
-    float padding0;
-    float color[4];
-    float intensity;
-    float range;
-    float padding1[2];
+    XMFLOAT4 Position; 
+    XMFLOAT4 Color;   
 };
 
-struct LightBufferData
+struct SpotLight
 {
-    PointLight lights[8];
-    int lightCount;
-    float padding[3];
+    XMFLOAT4 Position; 
+    XMFLOAT4 Direction;
+    XMFLOAT4 Color; 
+};
+
+struct alignas(256) LightBufferData
+{
+    XMFLOAT4 DirLightDir;     
+    XMFLOAT4 DirLightColor;  
+    PointLight PointLights[3]; 
+    SpotLight  SpotLights[2]; 
+
+    int NumPointLights;
+    int NumSpotLights;
+    float Pad[2];
+
+    XMFLOAT4 AmbientColor;
+    XMFLOAT4 EyePos;
 };
 
 class RenderingSystem
@@ -100,7 +111,7 @@ public:
     void SetTexTiling(float x, float y) { m_texTiling = { x, y }; }
     void SetTexScroll(float x, float y) { m_texScroll = { x, y }; }
     void UpdateCamera(float deltaTime, const InputDevice& input);
-    void AddLight();  
+    void AddLight();
     void SetDeferredRendering(bool enable) { m_useDeferredRendering = enable; }
 
 private:

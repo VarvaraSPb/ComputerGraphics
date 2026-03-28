@@ -28,10 +28,9 @@ bool Gbuffer::Initialize(ID3D12Device* device, int width, int height)
         return false;
 
     DXGI_FORMAT formats[COUNT] = {
-    DXGI_FORMAT_R8G8B8A8_UNORM,     
-    DXGI_FORMAT_R16G16B16A16_FLOAT, 
-    DXGI_FORMAT_R8G8B8A8_UNORM,      
-    DXGI_FORMAT_R32G32B32A32_FLOAT,  
+        DXGI_FORMAT_R8G8B8A8_UNORM,       
+        DXGI_FORMAT_R16G16B16A16_FLOAT,  
+        DXGI_FORMAT_R32G32B32A32_FLOAT,  
     };
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
@@ -119,9 +118,7 @@ void Gbuffer::Bind(ID3D12GraphicsCommandList* cmdList)
     cmdList->OMSetRenderTargets(COUNT, rtvHandles, FALSE, &dsvHandle);
 }
 
-void Gbuffer::Unbind(ID3D12GraphicsCommandList* cmdList)
-{
-}
+void Gbuffer::Unbind(ID3D12GraphicsCommandList* cmdList){}
 
 void Gbuffer::Clear(ID3D12GraphicsCommandList* cmdList, const float clearColor[4])
 {
@@ -139,8 +136,6 @@ void Gbuffer::Clear(ID3D12GraphicsCommandList* cmdList, const float clearColor[4
 
 void Gbuffer::TransitionToRead(ID3D12GraphicsCommandList* cmdList)
 {
-    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
-
     for (int i = 0; i < COUNT; i++)
     {
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
@@ -154,13 +149,12 @@ void Gbuffer::TransitionToRead(ID3D12GraphicsCommandList* cmdList)
 void Gbuffer::TransitionToWrite(ID3D12GraphicsCommandList* cmdList)
 {
     D3D12_RESOURCE_BARRIER barriers[COUNT];
-
     for (int i = 0; i < COUNT; i++)
     {
         barriers[i] = CD3DX12_RESOURCE_BARRIER::Transition(
             m_renderTargets[i].Get(),
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 
-            D3D12_RESOURCE_STATE_RENDER_TARGET);        
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
     }
     cmdList->ResourceBarrier(COUNT, barriers);
 }
@@ -175,12 +169,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE Gbuffer::GetNormalSRV() const
     return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_srvHeap->GetGPUDescriptorHandleForHeapStart(), 1, m_srvDescriptorSize);
 }
 
-D3D12_GPU_DESCRIPTOR_HANDLE Gbuffer::GetSpecularSRV() const
-{
-    return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_srvHeap->GetGPUDescriptorHandleForHeapStart(), 2, m_srvDescriptorSize);
-}
-
 D3D12_GPU_DESCRIPTOR_HANDLE Gbuffer::GetPositionSRV() const
 {
-    return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_srvHeap->GetGPUDescriptorHandleForHeapStart(), 3, m_srvDescriptorSize);
+    return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_srvHeap->GetGPUDescriptorHandleForHeapStart(), 2, m_srvDescriptorSize);
 }

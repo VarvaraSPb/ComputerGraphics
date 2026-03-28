@@ -1,4 +1,4 @@
-﻿#include "RenderingSystem.h"
+#include "RenderingSystem.h"
 #include <stdexcept>
 #include <cassert>
 #include <cmath>
@@ -237,7 +237,7 @@ void RenderingSystem::CompileGeometryShaders()
 
     OutputDebugStringA("Compiling GeometryPass.hlsl PS...\n");
     hr = D3DCompileFromFile(L"GeometryPass.hlsl",
-        nullptr, nullptr, "PSMain", "ps_5_0", flags, 0, &m_psBlob, &errors); 
+        nullptr, nullptr, "PSMain", "ps_5_0", flags, 0, &m_psBlob, &errors);
     if (FAILED(hr)) {
         if (errors) OutputDebugStringA((char*)errors->GetBufferPointer());
         ThrowIfFailed(hr);
@@ -301,33 +301,39 @@ void RenderingSystem::CreateRootSignature()
 
 void RenderingSystem::CreateLightingRootSignature()
 {
-    CD3DX12_DESCRIPTOR_RANGE srvRanges[4] = {};
+    CD3DX12_DESCRIPTOR_RANGE srvRanges[3] = {};
     srvRanges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); 
-    srvRanges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1); 
+    srvRanges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
     srvRanges[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2); 
-    srvRanges[3].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3); 
 
     CD3DX12_ROOT_PARAMETER params[2] = {};
-    params[0].InitAsConstantBufferView(0); 
-    params[1].InitAsDescriptorTable(4, srvRanges, D3D12_SHADER_VISIBILITY_PIXEL); 
+    params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+    params[1].InitAsDescriptorTable(3, srvRanges, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC sampler(0,
         D3D12_FILTER_MIN_MAG_MIP_LINEAR,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        0, 0, D3D12_COMPARISON_FUNC_ALWAYS,
+        D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK,
+        0.0f, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_ROOT_SIGNATURE_DESC rsDesc(2, params, 1, &sampler,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     ComPtr<ID3DBlob> serialized, errors;
     HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
-    ThrowIfFailed(hr);
+    if (FAILED(hr)) {
+        if (errors) OutputDebugStringA((char*)errors->GetBufferPointer());
+        ThrowIfFailed(hr);
+    }
 
     hr = m_device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
         IID_PPV_ARGS(&m_lightingRootSignature));
     ThrowIfFailed(hr);
 }
+
 void RenderingSystem::CreatePipelineStateObject()
 {
     D3D12_INPUT_ELEMENT_DESC layout[] =
@@ -391,11 +397,10 @@ void RenderingSystem::CreateGeometryPassPSO()
     psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     psoDesc.SampleMask = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    psoDesc.NumRenderTargets = 4;
-    psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    psoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    psoDesc.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    psoDesc.NumRenderTargets = 3;
+    psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;      
+    psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;  
+    psoDesc.RTVFormats[2] = DXGI_FORMAT_R32G32B32A32_FLOAT; 
     psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     psoDesc.SampleDesc = { 1, 0 };
 
@@ -407,9 +412,9 @@ void RenderingSystem::CreateLightingPassPSO()
     D3D12_INPUT_ELEMENT_DESC layout[] =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
-        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12,
-        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
@@ -419,12 +424,17 @@ void RenderingSystem::CreateLightingPassPSO()
     psoDesc.PS = { m_lightingPSBlob->GetBufferPointer(), m_lightingPSBlob->GetBufferSize() };
 
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
 
     D3D12_BLEND_DESC blendDesc = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     blendDesc.RenderTarget[0].BlendEnable = TRUE;
     blendDesc.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
     blendDesc.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
     blendDesc.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    blendDesc.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     psoDesc.BlendState = blendDesc;
 
     psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
@@ -433,6 +443,7 @@ void RenderingSystem::CreateLightingPassPSO()
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     psoDesc.NumRenderTargets = 1;
     psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
     psoDesc.SampleDesc = { 1, 0 };
 
     ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_lightingPassPSO)));
@@ -676,13 +687,13 @@ void RenderingSystem::DrawScene(float totalTime, float /*dt*/)
 {
     if (m_useDeferredRendering)
     {
-        AddLight(); 
+        AddLight();
 
         RenderGeometryPass(totalTime);
 
         m_gbuffer.TransitionToRead(m_cmdList.Get());
 
-        AddLight();  
+        AddLight();
 
         RenderLightingPass();
     }
@@ -801,7 +812,7 @@ void RenderingSystem::CreateScreenQuad()
 
 void RenderingSystem::CreateLightingResources()
 {
-    UINT bufferSize = 64;
+    UINT bufferSize = sizeof(LightBufferData);
 
     CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
     CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Buffer(bufferSize);
@@ -830,99 +841,38 @@ void RenderingSystem::CreateLightingResources()
 
     if (m_lightMappedData)
     {
-        memset(m_lightMappedData, 0, bufferSize);
-
-        char buf[256];
-        sprintf_s(buf, "Light buffer created with size %d bytes\n", bufferSize);
-        OutputDebugStringA(buf);
+        memset(m_lightMappedData, 0, sizeof(LightBufferData));
+        OutputDebugStringA("Light buffer created and mapped successfully\n");
     }
 }
 
 void RenderingSystem::AddLight()
 {
-    if (m_lightMappedData)
-    {
-        float* data = reinterpret_cast<float*>(m_lightMappedData);
-        memset(m_lightMappedData, 0, 256);
+    if (!m_lightMappedData) return;
 
-        // POINT LIGHT 0 - красный
-        data[0] = -300.0f;    // pos.x
-        data[1] = 200.0f;     // pos.y
-        data[2] = 0.0f;       // pos.z
-        data[3] = 1.0f;
-        data[4] = 1.0f;       // color.r 
-        data[5] = 0.0f;       // color.g
-        data[6] = 0.0f;       // color.b
-        data[7] = 1.0f;
-        data[8] = 5.0f;       // intensity
-        data[9] = 500.0f;     // range
-        data[10] = 1.0f;      // enabled
-        data[11] = 0.0f;
+    memset(m_lightMappedData, 0, sizeof(LightBufferData));
 
-        // POINT LIGHT 1 - зел
-        data[12] = 300.0f;    // pos.x
-        data[13] = 200.0f;    // pos.y
-        data[14] = 0.0f;      // pos.z
-        data[15] = 1.0f;
-        data[16] = 0.0f;      // color.r
-        data[17] = 1.0f;      // color.g 
-        data[18] = 0.0f;      // color.b
-        data[19] = 1.0f;
-        data[20] = 5.0f;      // intensity
-        data[21] = 500.0f;    // range
-        data[22] = 1.0f;      // enabled
-        data[23] = 0.0f;
+    m_lightMappedData->DirLightDir = XMFLOAT4(0.3f, -1.0f, 0.5f, 0.0f);
+    m_lightMappedData->DirLightColor = XMFLOAT4(0.5f, 0.2f, 0.8f, 0.3f);
 
-        // POINT LIGHT 2 - синий
-        data[24] = 0.0f;      // pos.x
-        data[25] = 400.0f;    // pos.y
-        data[26] = 0.0f;      // pos.z
-        data[27] = 1.0f;
-        data[28] = 0.0f;      // color.r
-        data[29] = 0.0f;      // color.g
-        data[30] = 1.0f;      // color.b 
-        data[31] = 1.0f;
-        data[32] = 5.0f;      // intensity
-        data[33] = 500.0f;    // range
-        data[34] = 1.0f;      // enabled
-        data[35] = 0.0f;
+    m_lightMappedData->PointLights[0].Position = XMFLOAT4(-400.0f, 250.0f, -100.0f, 450.0f);
+    m_lightMappedData->PointLights[0].Color = XMFLOAT4(0.0f, 1.0f, 1.0f, 12.0f);
 
-        // DIRECTIONAL LIGHT - фиол
-        data[36] = 0.5f;      // dir.x
-        data[37] = -1.0f;     // dir.y
-        data[38] = 0.3f;      // dir.z
-        data[39] = 0.0f;
-        data[40] = 0.8f;      // color.r
-        data[41] = 0.2f;      // color.g
-        data[42] = 1.0f;      // color.b
-        data[43] = 1.0f;
-        data[44] = 1.0f;      // intensity
-        data[45] = 1.0f;      // enabled
-        data[46] = 0.0f;
-        data[47] = 0.0f;
+    m_lightMappedData->PointLights[1].Position = XMFLOAT4(400.0f, 250.0f, 100.0f, 450.0f);
+    m_lightMappedData->PointLights[1].Color = XMFLOAT4( 1.0f, 0.0f, 0.8f, 12.0f );
 
-        // SPOT LIGHT - ЖЕЛТЫЙ
-        data[48] = 0.0f;      // pos.x
-        data[49] = 300.0f;    // pos.y
-        data[50] = 200.0f;    // pos.z 
-        data[51] = 1.0f;
-        data[52] = 0.0f;      // dir.x
-        data[53] = -1.0f;     // dir.y 
-        data[54] = 0.0f;      // dir.z
-        data[55] = 0.0f;
-        data[56] = 1.0f;      // color.r 
-        data[57] = 1.0f;      // color.g
-        data[58] = 0.0f;      // color.b
-        data[59] = 1.0f;
-        data[60] = 8.0f;      
-        data[61] = 800.0f;    
-        data[62] = 45.0f;    
-        data[63] = 1.0f;     
+    float innerAngle = XMConvertToRadians(40.0f);
+    float outerAngle = XMConvertToRadians(60.0f);
 
-        char buf[256];
-        sprintf_s(buf, "RED, GREEN, BLUE (point) + PURPLE (directional) + YELLOW (spot)\n");
-        OutputDebugStringA(buf);
-    }
+    m_lightMappedData->SpotLights[0].Position = XMFLOAT4(0.0f, 200.0f, 0.0f, cosf(innerAngle));
+    m_lightMappedData->SpotLights[0].Direction = XMFLOAT4(0.0f, -1.0f, 0.0f, cosf(outerAngle));
+    m_lightMappedData->SpotLights[0].Color = XMFLOAT4(1.0f, 0.5f, 0.0f, 75.0f);
+
+    m_lightMappedData->NumPointLights = 2;
+    m_lightMappedData->NumSpotLights = 1;
+
+    m_lightMappedData->AmbientColor = XMFLOAT4(0.05f, 0.05f, 0.08f, 1.0f);
+    m_lightMappedData->EyePos = XMFLOAT4(m_eye.x, m_eye.y, m_eye.z, 1.0f);
 }
 
 void RenderingSystem::RenderGeometryPass(float totalTime)
@@ -1018,30 +968,28 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
 
 void RenderingSystem::RenderLightingPass()
 {
-    CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(
-        m_rtvHeap->GetCPUDescriptorHandleForHeapStart(),
-        m_frameIndex,
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(), m_frameIndex, 
         m_rtvDescSize);
     m_cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-
     m_cmdList->SetPipelineState(m_lightingPassPSO.Get());
     m_cmdList->SetGraphicsRootSignature(m_lightingRootSignature.Get());
 
     ID3D12DescriptorHeap* heaps[] = { m_gbuffer.GetSRVHeap() };
     m_cmdList->SetDescriptorHeaps(1, heaps);
 
-    CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(m_gbuffer.GetSRVHeap()->GetGPUDescriptorHandleForHeapStart());
+    CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(m_gbuffer.GetSRVHeap()->GetGPUDescriptorHandleForHeapStart(), 0,
+        m_cbvSrvDescSize);
     m_cmdList->SetGraphicsRootDescriptorTable(1, srvHandle);
 
     if (m_lightBuffer)
     {
         m_cmdList->SetGraphicsRootConstantBufferView(0, m_lightBuffer->GetGPUVirtualAddress());
-        OutputDebugStringA("  Light buffer bound\n");
     }
 
-    m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    m_cmdList->IASetVertexBuffers(0, 1, &m_screenQuadVBView);
-    m_cmdList->DrawInstanced(4, 1, 0, 0);
+    m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_cmdList->IASetVertexBuffers(0, 0, nullptr); 
+    m_cmdList->IASetIndexBuffer(nullptr);       
+    m_cmdList->DrawInstanced(3, 1, 0, 0);      
 }
 
 

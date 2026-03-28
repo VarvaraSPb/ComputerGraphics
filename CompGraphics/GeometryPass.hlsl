@@ -1,81 +1,73 @@
-cbuffer ConstantBuffer : register(b0)
+cbuffer GBufferCB : register(b0)
 {
-    matrix world;
-    matrix view;
-    matrix proj;
-    matrix worldInvTranspose;
-    float4 lightDir;
-    float4 lightColor;
-    float4 ambientColor;
-    float4 eyePos;
-    float4 materialDiffuse;
-    float4 materialSpecular;
-    float specularPower;
-    float totalTime;
-    float texTilingX;
-    float texTilingY;
-    float texScrollX;
-    float texScrollY;
-    int hasTexture;
-    float3 padding;
+    float4x4 gWorld;
+    float4x4 gView;
+    float4x4 gProj;
+    float4x4 gWorldInvTranspose; 
+    float4 gMaterialDiffuse;
+    float4 gMaterialSpecular; 
+    
+    int gHasTexture;
+    float gTexTilingX;
+    float gTexTilingY;
+    float gTotalTime;
+    float gTexScrollX;
+    float gTexScrollY;
+    float2 gPad;
 };
+
+Texture2D gDiffuseMap : register(t0);
+SamplerState gSampler : register(s0);
 
 struct VSInput
 {
-    float3 position : POSITION;
-    float3 normal : NORMAL;
-    float2 texCoord : TEXCOORD;
+    float3 Position : POSITION;
+    float3 Normal : NORMAL;
+    float2 TexCoord : TEXCOORD;
 };
 
 struct VSOutput
 {
-    float4 position : SV_POSITION;
-    float3 worldPos : TEXCOORD0;
-    float3 normal : TEXCOORD1;
-    float2 texCoord : TEXCOORD2;
+    float4 PosH : SV_POSITION;
+    float3 PosW : TEXCOORD0;
+    float3 NormalW : TEXCOORD1; 
+    float2 TexCoord : TEXCOORD2;
 };
-
-Texture2D diffuseTexture : register(t0);
-SamplerState samplerState : register(s0);
-
-VSOutput VSMain(VSInput input)
-{
-    VSOutput output;
-    
-    float4 worldPos = mul(float4(input.position, 1.0f), world);
-    output.worldPos = worldPos.xyz;
-    output.position = mul(worldPos, view);
-    output.position = mul(output.position, proj);
-    
-    output.normal = mul(input.normal, (float3x3) worldInvTranspose);
-    output.normal = normalize(output.normal);
-    
-    float2 uv = input.texCoord * float2(texTilingX, texTilingY);
-    uv.x += totalTime * texScrollX;
-    uv.y += totalTime * texScrollY;
-    output.texCoord = uv;
-    
-    return output;
-}
 
 struct PSOutput
 {
-    float4 albedo : SV_Target0;
-    float4 normal : SV_Target1;
-    float4 specular : SV_Target2;
-    float4 position : SV_Target3;
+    float4 Albedo : SV_Target0; 
+    float4 Normal : SV_Target1;
+    float4 Position : SV_Target2; 
 };
 
-PSOutput PSMain(VSOutput input)
+VSOutput VSMain(VSInput vin)
 {
-    PSOutput output;
+    VSOutput vout;
     
-    float4 texColor = diffuseTexture.Sample(samplerState, input.texCoord);
-    output.albedo = materialDiffuse * texColor;
+    float4 posW = mul(float4(vin.Position, 1.0f), gWorld);
+    vout.PosW = posW.xyz;
     
-    output.normal = float4(input.normal * 0.5f + 0.5f, 1.0f);
-    output.specular = materialSpecular;
-    output.position = float4(input.worldPos, 1.0f);
+    float4 posV = mul(posW, gView);
+    vout.PosH = mul(posV, gProj);
     
-    return output;
+    vout.NormalW = mul(vin.Normal, (float3x3) gWorldInvTranspose);
+    
+    float2 uv = vin.TexCoord * float2(gTexTilingX, gTexTilingY);
+    uv += float2(gTexScrollX, gTexScrollY) * gTotalTime;
+    vout.TexCoord = uv;
+    
+    return vout;
+}
+
+PSOutput PSMain(VSOutput pin)
+{
+    PSOutput pout;
+    float4 albedo = gHasTexture ? gDiffuseMap.Sample(gSampler, pin.TexCoord): gMaterialDiffuse;
+    float3 normal = normalize(pin.NormalW);
+    pout.Albedo = float4(albedo.rgb, gMaterialSpecular.x);
+    pout.Normal = float4(normal * 0.5f + 0.5f, gMaterialSpecular.w);
+    pout.Position = float4(pin.PosW, 1.0f);
+    
+    return pout;
 }

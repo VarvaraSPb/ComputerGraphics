@@ -8,7 +8,7 @@ using Microsoft::WRL::ComPtr;
 class Gbuffer
 {
 public:
-    static constexpr int COUNT = 4;
+    static constexpr int COUNT = 3;  
 
     bool Initialize(ID3D12Device* device, int width, int height);
     void Bind(ID3D12GraphicsCommandList* cmdList);
@@ -17,11 +17,9 @@ public:
     void TransitionToRead(ID3D12GraphicsCommandList* cmdList);
     void TransitionToWrite(ID3D12GraphicsCommandList* cmdList);
 
-
     ID3D12DescriptorHeap* GetSRVHeap() const { return m_srvHeap.Get(); }
     D3D12_GPU_DESCRIPTOR_HANDLE GetAlbedoSRV() const;
     D3D12_GPU_DESCRIPTOR_HANDLE GetNormalSRV() const;
-    D3D12_GPU_DESCRIPTOR_HANDLE GetSpecularSRV() const;
     D3D12_GPU_DESCRIPTOR_HANDLE GetPositionSRV() const;
 
     int GetWidth() const { return m_width; }
