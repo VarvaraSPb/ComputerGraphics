@@ -1,9 +1,12 @@
-#include "Gbuffer.h"
+﻿#include "Gbuffer.h"
 
-bool Gbuffer::Initialize(ID3D12Device* device, int width, int height)
+bool Gbuffer::Initialize(ID3D12Device* device, ID3D12DescriptorHeap* sharedSrvHeap, int width, int height)
 {
     m_width = width;
     m_height = height;
+
+    if (!sharedSrvHeap) return false;
+    m_sharedSrvHeap = sharedSrvHeap;
 
     m_rtvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     m_srvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -14,13 +17,6 @@ bool Gbuffer::Initialize(ID3D12Device* device, int width, int height)
     if (FAILED(device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&m_rtvHeap))))
         return false;
 
-    D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
-    srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srvDesc.NumDescriptors = COUNT;
-    srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (FAILED(device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&m_srvHeap))))
-        return false;
-
     D3D12_DESCRIPTOR_HEAP_DESC dsvDesc = {};
     dsvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     dsvDesc.NumDescriptors = 1;
@@ -28,13 +24,13 @@ bool Gbuffer::Initialize(ID3D12Device* device, int width, int height)
         return false;
 
     DXGI_FORMAT formats[COUNT] = {
-        DXGI_FORMAT_R8G8B8A8_UNORM,       
-        DXGI_FORMAT_R16G16B16A16_FLOAT,  
-        DXGI_FORMAT_R32G32B32A32_FLOAT,  
+        DXGI_FORMAT_R8G8B8A8_UNORM,       // Albedo
+        DXGI_FORMAT_R16G16B16A16_FLOAT,   // Normal
+        DXGI_FORMAT_R32G32B32A32_FLOAT,   // Position
     };
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
-    CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_srvHeap->GetCPUDescriptorHandleForHeapStart());
+    CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_sharedSrvHeap->GetCPUDescriptorHandleForHeapStart());
 
     for (int i = 0; i < COUNT; i++)
     {
@@ -70,9 +66,10 @@ bool Gbuffer::Initialize(ID3D12Device* device, int width, int height)
         device->CreateShaderResourceView(m_renderTargets[i].Get(), &srvDescTex, srvHandle);
 
         rtvHandle.Offset(1, m_rtvDescriptorSize);
-        srvHandle.Offset(1, m_srvDescriptorSize);
+        srvHandle.Offset(1, m_srvDescriptorSize); 
     }
 
+    // Depth Stencil
     D3D12_RESOURCE_DESC depthDesc = {};
     depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     depthDesc.Width = width;
@@ -118,8 +115,6 @@ void Gbuffer::Bind(ID3D12GraphicsCommandList* cmdList)
     cmdList->OMSetRenderTargets(COUNT, rtvHandles, FALSE, &dsvHandle);
 }
 
-void Gbuffer::Unbind(ID3D12GraphicsCommandList* cmdList){}
-
 void Gbuffer::Clear(ID3D12GraphicsCommandList* cmdList, const float clearColor[4])
 {
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
@@ -157,19 +152,4 @@ void Gbuffer::TransitionToWrite(ID3D12GraphicsCommandList* cmdList)
             D3D12_RESOURCE_STATE_RENDER_TARGET);
     }
     cmdList->ResourceBarrier(COUNT, barriers);
-}
-
-D3D12_GPU_DESCRIPTOR_HANDLE Gbuffer::GetAlbedoSRV() const
-{
-    return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_srvHeap->GetGPUDescriptorHandleForHeapStart(), 0, m_srvDescriptorSize);
-}
-
-D3D12_GPU_DESCRIPTOR_HANDLE Gbuffer::GetNormalSRV() const
-{
-    return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_srvHeap->GetGPUDescriptorHandleForHeapStart(), 1, m_srvDescriptorSize);
-}
-
-D3D12_GPU_DESCRIPTOR_HANDLE Gbuffer::GetPositionSRV() const
-{
-    return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_srvHeap->GetGPUDescriptorHandleForHeapStart(), 2, m_srvDescriptorSize);
 }

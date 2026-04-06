@@ -1,47 +1,39 @@
-#define MAX_POINT_LIGHTS 3
-#define MAX_SPOT_LIGHTS  2
+#define MAX_SPOT_LIGHTS 2
 
 struct PointLight
 {
     float4 Position;
-    float4 Color; 
+    float4 Color;
 };
-
 struct SpotLight
 {
-    float4 Position; 
-    float4 Direction; 
-    float4 Color; 
+    float4 Position;
+    float4 Direction;
+    float4 Color;
 };
 
 cbuffer LightingCB : register(b0)
 {
     float4 gDirLightDir;
     float4 gDirLightColor;
-    
-    PointLight gPointLights[MAX_POINT_LIGHTS];
     SpotLight gSpotLights[MAX_SPOT_LIGHTS];
-    
-    int gNumPointLights;
     int gNumSpotLights;
-    
-    float2 gPad;
-    
+    float3 gPad0;
     float4 gAmbientColor;
     float4 gEyePos;
 };
 
-Texture2D gAlbedoMap : register(t0); 
+Texture2D gAlbedoMap : register(t0);
 Texture2D gNormalMap : register(t1);
-Texture2D gPositionMap : register(t2); 
-SamplerState gSampler : register(s0); 
+Texture2D gPositionMap : register(t2);
+StructuredBuffer<PointLight> gPointLights : register(t3);
+SamplerState gSampler : register(s0);
 
 struct VSInput
 {
     float4 position : POSITION;
     float2 texCoord : TEXCOORD;
 };
-
 struct PSInput
 {
     float4 position : SV_POSITION;
@@ -51,87 +43,10 @@ struct PSInput
 PSInput VSMain(uint vertexID : SV_VertexID)
 {
     PSInput output;
-    
     float2 uv = float2((vertexID << 1) & 2, vertexID & 2);
     output.texCoord = uv;
     output.position = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
-    
     return output;
-}
-
-float3 PhongBRDF(
-    float3 N, 
-    float3 V,
-    float3 L,
-    float3 albedo, 
-    float specIntensity, 
-    float specPow, 
-    float3 lightColor, 
-    float lightIntensity 
-)
-{
-    float NdotL = max(dot(N, L), 0.0f);
-    float3 diffuse = NdotL * albedo * lightColor;
-    float3 R = reflect(-L, N);
-    float RdotV = max(dot(R, V), 0.0f);
-    float3 specular = pow(RdotV, max(specPow, 1.0f)) * specIntensity * lightColor;
-    return (diffuse + specular) * lightIntensity;
-}
-
-float3 CalcDirectional(
-    float3 N, float3 V, float3 pos,
-    float3 albedo, float specIntensity, float specPow)
-{
-    if (gDirLightColor.w <= 0.0f)
-        return float3(0, 0, 0);
-    
-    float3 L = normalize(-gDirLightDir.xyz);
-    return PhongBRDF(N, V, L, albedo, specIntensity, specPow,
-                     gDirLightColor.xyz, gDirLightColor.w);
-}
-
-float3 CalcPoint(
-    PointLight light,
-    float3 N, float3 V, float3 pos,
-    float3 albedo, float specIntensity, float specPow)
-{
-    float3 toLight = light.Position.xyz - pos;
-    float dist = length(toLight);
-    float radius = light.Position.w;
-    
-    if (dist >= radius)
-        return float3(0, 0, 0);
-    
-    float3 L = toLight / dist;
-    
-    float attenuation = 1.0f - smoothstep(0.0f, radius, dist);
-    
-    return PhongBRDF(N, V, L, albedo, specIntensity, specPow,
-                     light.Color.xyz, light.Color.w) * attenuation;
-}
-
-float3 CalcSpot(
-    SpotLight light,
-    float3 N, float3 V, float3 pos,
-    float3 albedo, float specIntensity, float specPow)
-{
-    float3 toLight = light.Position.xyz - pos;
-    float dist = length(toLight);
-    
-    if (dist <= 0.001f)
-        return float3(0, 0, 0);
-    
-    float3 L = toLight / dist;
-    float3 spotDir = normalize(light.Direction.xyz);
-    float cosAngle = dot(-L, spotDir);
-    float cosInner = light.Position.w;
-    float cosOuter = light.Direction.w;
-    float spotFactor = smoothstep(cosOuter, cosInner, cosAngle);
-    if (spotFactor <= 0.0f)
-        return float3(0, 0, 0);
-    
-    float attenuation = 1.0f / (1.0f + 0.001f * dist * dist);
-    return PhongBRDF(N, V, L, albedo, specIntensity, specPow, light.Color.xyz, light.Color.w) * attenuation * spotFactor;
 }
 
 float4 PSMain(PSInput input) : SV_Target
@@ -141,28 +56,88 @@ float4 PSMain(PSInput input) : SV_Target
     float4 positionData = gPositionMap.Sample(gSampler, input.texCoord);
     
     float3 albedo = albedoData.rgb;
-    float specIntensity = albedoData.a; 
-    float3 N = normalize(normalData.rgb * 2.0f - 1.0f); 
-    float specPow = max(normalData.a, 1.0f); 
     float3 pos = positionData.rgb;
     
-    if (length(pos) < 0.001f)
-        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+    if (length(pos) < 0.1)
+        return float4(0.05, 0.05, 0.08, 1.0);
+    
+    float3 N = normalData.rgb * 2.0 - 1.0;
+    float nLen = length(N);
+    if (nLen < 0.01)
+        N = float3(0.0, 1.0, 0.0);
+    else
+        N /= nLen;
     
     float3 V = normalize(gEyePos.xyz - pos);
-    float3 lighting = gAmbientColor.rgb * albedo;
-    lighting += CalcDirectional(N, V, pos, albedo, specIntensity, specPow);
     
-    for (int i = 0; i < gNumPointLights; ++i)
+    float3 finalColor = albedo * gAmbientColor.xyz * gAmbientColor.w;
+    
+    float3 L = normalize(-gDirLightDir.xyz);
+    float NdotL = max(dot(N, L), 0.0);
+    finalColor += NdotL * albedo * gDirLightColor.xyz * gDirLightColor.w;
+    
+    // red
+    float3 redLightPos = float3(-200.0, 80.0, -150.0);
+    float3 toLightRed = redLightPos - pos;
+    float distRed = length(toLightRed);
+    if (distRed < 250.0 && distRed > 0.01)
     {
-        lighting += CalcPoint(gPointLights[i], N, V, pos,
-                              albedo, specIntensity, specPow);
+        float3 lDirRed = toLightRed / distRed;
+        float attRed = pow(1.0 - (distRed / 250.0), 2.0);
+        finalColor += max(dot(N, lDirRed), 0.0) * float3(1.0, 0.2, 0.2) * 3.0 * attRed;
     }
     
-    for (int j = 0; j < gNumSpotLights; ++j)
+    // green
+    float3 greenLightPos = float3(200.0, 70.0, 150.0);
+    float3 toLightGreen = greenLightPos - pos;
+    float distGreen = length(toLightGreen);
+    if (distGreen < 250.0 && distGreen > 0.01)
     {
-        lighting += CalcSpot(gSpotLights[j], N, V, pos,
-                             albedo, specIntensity, specPow);
+        float3 lDirGreen = toLightGreen / distGreen;
+        float attGreen = pow(1.0 - (distGreen / 250.0), 2.0);
+        finalColor += max(dot(N, lDirGreen), 0.0) * float3(0.2, 1.0, 0.2) * 3.0 * attGreen;
     }
-    return float4(lighting, albedoData.a);
+    
+    // blue
+    float3 blueLightPos = float3(-100.0, 500.0, -200.0);
+    float3 toLightBlue = blueLightPos - pos;
+    float distBlue = length(toLightBlue);
+    if (distBlue < 250.0 && distBlue > 0.01)
+    {
+        float3 lDirBlue = toLightBlue / distBlue;
+        float attBlue = pow(1.0 - (distBlue / 250.0), 2.0);
+        finalColor += max(dot(N, lDirBlue), 0.0) * float3(0.2, 0.2, 1.0) * 3.0 * attBlue;
+    }
+    
+    // orange
+    float3 orangeLightPos = float3(250.0, 530.0, 280.0);
+    float3 toLightOrange = orangeLightPos - pos;
+    float distOrange = length(toLightOrange);
+    if (distOrange < 300.0 && distOrange > 0.01)
+    {
+        float3 lDirOrange = toLightOrange / distOrange;
+        float attOrange = pow(1.0 - (distOrange / 300.0), 2.0);
+        finalColor += max(dot(N, lDirOrange), 0.0) * float3(1.0, 0.5, 0.1) * 4.5 * attOrange;
+    }
+    
+    // "rain"
+    for (uint i = 0; i < 300; i++)
+    {
+        PointLight light = gPointLights[i];
+        if (light.Position.w <= 0.5)
+            continue;
+    
+        float3 toLightCenter = light.Position.xyz - pos;
+        float distToLight = length(toLightCenter);
+    
+        if (distToLight < light.Position.w * 0.5)
+        {
+            finalColor += light.Color.rgb * light.Color.w * 2.0;
+        }
+    }
+    
+    finalColor = pow(finalColor, 1.0 / 2.2);
+    finalColor = max(finalColor, albedo * 0.1); // soften shadows
+    
+    return float4(finalColor, 1.0);
 }

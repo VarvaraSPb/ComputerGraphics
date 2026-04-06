@@ -3,7 +3,6 @@
 #include "Timer.h"
 #include "InputDevice.h"
 
-
 class App
 {
 public:
