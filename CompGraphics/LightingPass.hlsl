@@ -120,7 +120,6 @@ float4 PSMain(PSInput input) : SV_Target
         finalColor += max(dot(N, lDirOrange), 0.0) * float3(1.0, 0.5, 0.1) * 4.5 * attOrange;
     }
     
-    // "rain"
     for (uint i = 0; i < 300; i++)
     {
         PointLight light = gPointLights[i];
@@ -129,10 +128,18 @@ float4 PSMain(PSInput input) : SV_Target
     
         float3 toLightCenter = light.Position.xyz - pos;
         float distToLight = length(toLightCenter);
-    
-        if (distToLight < light.Position.w * 0.5)
+        float rainRadius = 3.0; 
+        
+        if (distToLight < rainRadius)
         {
-            finalColor += light.Color.rgb * light.Color.w * 2.0;
+            float intensity = 1.0 - (distToLight / rainRadius);
+            finalColor += light.Color.rgb * light.Color.w * intensity * 3.0;
+        }
+        
+        if (distToLight < rainRadius * 2.0)
+        {
+            float glowIntensity = 1.0 - (distToLight / (rainRadius * 2.0));
+            finalColor += light.Color.rgb * light.Color.w * glowIntensity * 0.5;
         }
     }
     

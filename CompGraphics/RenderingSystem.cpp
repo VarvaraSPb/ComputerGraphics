@@ -514,6 +514,7 @@ if (m_spawnTimer >= m_spawnInterval) {
             light.data.Color = XMFLOAT4(0.7f, 0.8f, 0.9f, 2.5f);
             light.active = true;
             light.velocity = XMFLOAT3(0.f, -80.f, 0.f);
+            light.lifeTime = 0.f;
             break;
         }
     }
@@ -521,14 +522,20 @@ if (m_spawnTimer >= m_spawnInterval) {
     m_activeLightCount = 0;
     for (auto& light : m_rainLights) {
         if (!light.active) continue;
+        
         light.data.Position.x += light.velocity.x * deltaTime;
         light.data.Position.y += light.velocity.y * deltaTime;
         light.data.Position.z += light.velocity.z * deltaTime;
+        light.lifeTime += deltaTime;
+        
         if (light.data.Position.y <= m_floorY) {
-            light.data.Position.x = m_spawnAreaMin.x + ((float)rand() / RAND_MAX) * (m_spawnAreaMax.x - m_spawnAreaMin.x);
-            light.data.Position.z = m_spawnAreaMin.z + ((float)rand() / RAND_MAX) * (m_spawnAreaMax.z - m_spawnAreaMin.z);
-            light.data.Position.y = m_spawnAreaMax.y;
-            light.velocity = XMFLOAT3(0.f, -80.f, 0.f);
+            light.data.Position.y = m_floorY;
+            light.velocity = XMFLOAT3(0.f, 0.f, 0.f);
+            
+            if (light.lifeTime > 3.5f) {
+                light.active = false;
+                light.data = {};
+            }
         }
         m_activeLightCount++;
     }
@@ -551,7 +558,6 @@ void RenderingSystem::AddLight() {
     m_lightMappedData->DirLightDir = XMFLOAT4(0.0f, 1.0f, 0.0f, 0.0f);
     m_lightMappedData->DirLightColor = XMFLOAT4(1.0f, 1.0f, 0.7f, 2.0f);
 
-    // Общий свет - очень слабый, чтобы подсветить тени
     m_lightMappedData->AmbientColor = XMFLOAT4(0.3f, 0.3f, 0.12f, 0.15f);
 
     m_lightMappedData->NumSpotLights = 0;

@@ -173,7 +173,7 @@ private:
 
     ComPtr<ID3D12Resource> m_pointLightBuffer;
     PointLight* m_pointLightsMapped = nullptr;
-    struct RainLight { PointLight data; bool active = false; XMFLOAT3 velocity{ 0.f, -200.f, 0.f }; };
+    struct RainLight { PointLight data; bool active = false; XMFLOAT3 velocity{ 0.f, -200.f, 0.f }; float lifeTime = 0.f; };
     std::vector<RainLight> m_rainLights;
     float m_spawnTimer = 0.f;
     float m_spawnInterval = 0.005f;
