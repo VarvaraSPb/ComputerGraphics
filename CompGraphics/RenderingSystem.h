@@ -39,12 +39,18 @@ struct alignas(256) ConstantBufferData {
     float TotalTime;
     float TexScrollX;
     float TexScrollY;
-    XMFLOAT2 Pad;
+    XMFLOAT3 EyePosW;
+    float DisplacementScale;
 };
 
 struct GpuMaterial {
     ComPtr<ID3D12Resource> texture;
     ComPtr<ID3D12Resource> textureUpload;
+    ComPtr<ID3D12Resource> normalTexture;
+    ComPtr<ID3D12Resource> normalUpload;
+    ComPtr<ID3D12Resource> displacementTexture;
+    ComPtr<ID3D12Resource> displacementUpload;
+
     int srvHeapIndex = -1;
     XMFLOAT4 diffuse = { 0.8f, 0.8f, 0.8f, 1.f };
     XMFLOAT4 specular = { 0.5f, 0.5f, 0.5f, 1.f };
@@ -53,8 +59,8 @@ struct GpuMaterial {
 };
 
 struct PointLight {
-    XMFLOAT4 Position; 
-    XMFLOAT4 Color;    
+    XMFLOAT4 Position;
+    XMFLOAT4 Color;
 };
 
 struct SpotLight {
@@ -90,6 +96,8 @@ public:
     void EndFrame();
     void OnResize(int width, int height);
     bool LoadObj(const std::string& path);
+    bool LoadStump(const std::string& path);
+
     void SetTexTiling(float x, float y) { m_texTiling = { x, y }; }
     void SetTexScroll(float x, float y) { m_texScroll = { x, y }; }
     void UpdateCamera(float deltaTime, const InputDevice& input);
@@ -119,6 +127,8 @@ private:
     void CreateLightingResources();
     void CreateRainLightBuffer();
     void CreateRainLightSRV();
+    void CreateDefaultTextures();
+
     void RenderGeometryPass(float totalTime);
     void RenderLightingPass();
     void RenderForwardPass(float totalTime);
@@ -151,7 +161,12 @@ private:
     ComPtr<ID3D12PipelineState> m_pso;
     ComPtr<ID3DBlob> m_vsBlob;
     ComPtr<ID3DBlob> m_psBlob;
+
+    ComPtr<ID3DBlob> m_hsBlob;
+    ComPtr<ID3DBlob> m_dsBlob;
+
     ComPtr<ID3D12PipelineState> m_geometryPassPSO;
+    ComPtr<ID3D12PipelineState> m_wireframePSO;
     ComPtr<ID3D12PipelineState> m_lightingPassPSO;
     ComPtr<ID3D12RootSignature> m_lightingRootSignature;
     ComPtr<ID3DBlob> m_lightingVSBlob;
@@ -164,13 +179,28 @@ private:
     std::vector<MeshSubset> m_subsets;
     std::vector<GpuMaterial> m_gpuMaterials;
 
+    ComPtr<ID3D12Resource> m_stumpVertexBuffer;
+    ComPtr<ID3D12Resource> m_stumpIndexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW m_stumpVbView{};
+    D3D12_INDEX_BUFFER_VIEW m_stumpIbView{};
+    std::vector<MeshSubset> m_stumpSubsets;
+    std::vector<GpuMaterial> m_stumpMaterials;
+
+    ComPtr<ID3D12Resource> m_defaultDiffuseTex;
+    ComPtr<ID3D12Resource> m_defaultNormalTex;
+    ComPtr<ID3D12Resource> m_defaultDisplacementTex;
+    ComPtr<ID3D12Resource> m_defaultDiffuseUpload;
+    ComPtr<ID3D12Resource> m_defaultNormalUpload;
+    ComPtr<ID3D12Resource> m_defaultDisplacementUpload;
+
+    UINT m_currentSrvSlot = 7;
+
     ComPtr<ID3D12Resource> m_constantBuffer;
     ConstantBufferData* m_cbMapped = nullptr;
     UINT m_cbSlotSize = 0;
 
     ComPtr<ID3D12Resource> m_lightBuffer;
     LightBufferData* m_lightMappedData = nullptr;
-
     ComPtr<ID3D12Resource> m_pointLightBuffer;
     PointLight* m_pointLightsMapped = nullptr;
     struct RainLight { PointLight data; bool active = false; XMFLOAT3 velocity{ 0.f, -200.f, 0.f }; float lifeTime = 0.f; };
@@ -191,14 +221,15 @@ private:
     XMFLOAT2 m_texScroll = { 0.05f, 0.f };
     int m_width = 0;
     int m_height = 0;
-
     XMFLOAT3 m_eye = { -80.f, 20.f, -20.f };
     XMFLOAT3 m_target = { 0.f, 10.f, 0.f };
     XMFLOAT3 m_up = { 0.f, 1.f, 0.f };
     float m_cameraSpeed = 500.0f;
     float m_cameraYaw = 0.0f;
     float m_cameraPitch = 0.0f;
-
     bool m_initialized = false;
     bool m_useDeferredRendering = true;
+
+    bool m_wireframeMode = false;
+    bool m_tKeyPressed = false;
 };
