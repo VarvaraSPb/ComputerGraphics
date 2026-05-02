@@ -6,14 +6,22 @@ cbuffer GBufferCB : register(b0)
     float4x4 gWorldInvTranspose;
     float4 gMaterialDiffuse;
     float4 gMaterialSpecular;
+    
     int gHasTexture;
     float gTexTilingX;
     float gTexTilingY;
     float gTotalTime;
+    
     float gTexScrollX;
     float gTexScrollY;
+    float2 gPad1;
+    
     float3 gEyePosW;
     float gDisplacementScale;
+    
+    float gTessNearDist;
+    float gTessFarDist;
+    float2 gPad2;
 };
 
 Texture2D gDiffuseMap : register(t0);
@@ -65,33 +73,35 @@ VSOutput VSMain(VSInput vin)
     return vout;
 }
 
-//Hull Shader 
+//Hull Shader
 HS_CONSTANT_DATA_OUTPUT CalcHSPatchConstants(
     InputPatch<VSOutput, 3> ip,
     uint PatchID : SV_PrimitiveID)
 {
     HS_CONSTANT_DATA_OUTPUT Output;
-    
     float3 centerW = (ip[0].PosW + ip[1].PosW + ip[2].PosW) / 3.0f;
-    
     float dist = distance(centerW, gEyePosW);
-
-    float minDist = 15.0f; 
-    float maxDist = 150.0f; 
-
-    float maxTess = 32.0f; 
-    float minTess = 1.0f; 
-
-    float tessFactor = minTess;
+    float minDist = gTessNearDist;
+    float maxDist = gTessFarDist;
     
-    float tess = maxTess * saturate((maxDist - dist) / (maxDist - minDist));
-    tessFactor = max(minTess, tess);
-
+    float maxTess = 16.0f;
+    float minTess = 2.0f;
+    
+    float tessFactor = minTess;
+    if (dist < maxDist)
+    {
+        float tess = maxTess * saturate((maxDist - dist) / (maxDist - minDist));
+        tessFactor = max(minTess, tess);
+    }
+    else
+    {
+        tessFactor = minTess;
+    }
+    
     Output.Edges[0] = tessFactor;
     Output.Edges[1] = tessFactor;
     Output.Edges[2] = tessFactor;
     Output.Inside = tessFactor;
-
     return Output;
 }
 

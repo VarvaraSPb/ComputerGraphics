@@ -24,6 +24,16 @@ public:
         m_renderingSystem.SetTexScroll(0.05f, 0.0f);
         m_renderingSystem.LoadObj("sponza.obj");
 
+        OutputDebugStringA("=========================\n");
+        OutputDebugStringA("Attempting to load Stump...\n");
+        bool stumpLoaded = m_renderingSystem.LoadStump("broken_stump.obj");
+        if (stumpLoaded) {
+            OutputDebugStringA("Stump LoadObj returned SUCCESS\n");
+        }
+        else {
+            OutputDebugStringA("Stump LoadObj returned FAILED\n");
+        }
+        OutputDebugStringA("=========================\n");
         AddTestLights();
 
         m_timer.Reset();

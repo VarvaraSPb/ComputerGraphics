@@ -46,12 +46,19 @@ bool Gbuffer::Initialize(ID3D12Device* device, ID3D12DescriptorHeap* sharedSrvHe
 
         CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
 
+        D3D12_CLEAR_VALUE clearValue = {};
+        clearValue.Format = formats[i];
+        clearValue.Color[0] = 0.0f;
+        clearValue.Color[1] = 0.0f;
+        clearValue.Color[2] = 0.0f;
+        clearValue.Color[3] = 0.0f;
+
         if (FAILED(device->CreateCommittedResource(
             &heapProps,
             D3D12_HEAP_FLAG_NONE,
             &texDesc,
-            D3D12_RESOURCE_STATE_RENDER_TARGET,
-            nullptr,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            &clearValue, 
             IID_PPV_ARGS(&m_renderTargets[i])
         ))) return false;
 
@@ -62,11 +69,10 @@ bool Gbuffer::Initialize(ID3D12Device* device, ID3D12DescriptorHeap* sharedSrvHe
         srvDescTex.Format = formats[i];
         srvDescTex.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDescTex.Texture2D.MipLevels = 1;
-
         device->CreateShaderResourceView(m_renderTargets[i].Get(), &srvDescTex, srvHandle);
 
         rtvHandle.Offset(1, m_rtvDescriptorSize);
-        srvHandle.Offset(1, m_srvDescriptorSize); 
+        srvHandle.Offset(1, m_srvDescriptorSize);
     }
 
     // Depth Stencil

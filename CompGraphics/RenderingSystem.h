@@ -33,14 +33,22 @@ struct alignas(256) ConstantBufferData {
     XMFLOAT4X4 WorldInvTranspose;
     XMFLOAT4 MaterialDiffuse;
     XMFLOAT4 MaterialSpecular;
+
     int HasTexture;
     float TexTilingX;
     float TexTilingY;
     float TotalTime;
+
     float TexScrollX;
     float TexScrollY;
+    XMFLOAT2 Pad1;
+
     XMFLOAT3 EyePosW;
     float DisplacementScale;
+
+    float TessNearDist;
+    float TessFarDist;
+    XMFLOAT2 Pad2;
 };
 
 struct GpuMaterial {
@@ -227,9 +235,13 @@ private:
     float m_cameraSpeed = 500.0f;
     float m_cameraYaw = 0.0f;
     float m_cameraPitch = 0.0f;
+    float m_totalTime = 0.0f;
     bool m_initialized = false;
     bool m_useDeferredRendering = true;
 
     bool m_wireframeMode = false;
     bool m_tKeyPressed = false;
+    
+    float m_tesselationNearDist = 200.0f;  
+    float m_tesselationFarDist = 1500.0f;  
 };

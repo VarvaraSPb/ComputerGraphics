@@ -7,13 +7,29 @@ static void ThrowIfFailed(HRESULT hr) {
     if (FAILED(hr)) throw std::runtime_error("DirectX call failed");
 }
 
-RenderingSystem::~RenderingSystem() {
-    if (m_initialized) FlushCommandQueue();
-    if (m_constantBuffer && m_cbMapped) m_constantBuffer->Unmap(0, nullptr);
-    if (m_pointLightBuffer && m_pointLightsMapped) m_pointLightBuffer->Unmap(0, nullptr);
-    if (m_lightBuffer && m_lightMappedData) m_lightBuffer->Unmap(0, nullptr);
+RenderingSystem::~RenderingSystem()
+{
+    // Безопасная очистка: если устройство удалено (Device Removed), COM-вызовы могут падать.
+    // Оборачиваем в try-catch, чтобы деструктор не выбрасывал исключений.
+    if (m_initialized) {
+        try { FlushCommandQueue(); }
+        catch (...) {}
+    }
+    if (m_constantBuffer && m_cbMapped) {
+        try { m_constantBuffer->Unmap(0, nullptr); }
+        catch (...) {}
+    }
+    if (m_pointLightBuffer && m_pointLightsMapped) {
+        try { m_pointLightBuffer->Unmap(0, nullptr); }
+        catch (...) {}
+    }
+    if (m_lightBuffer && m_lightMappedData) {
+        try { m_lightBuffer->Unmap(0, nullptr); }
+        catch (...) {}
+    }
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
-    CoUninitialize();
+    try { CoUninitialize(); }
+    catch (...) {}
 }
 
 bool RenderingSystem::Init(HWND hwnd, int width, int height) {
@@ -255,18 +271,37 @@ void RenderingSystem::CompileLightingShaders() {
 }
 
 void RenderingSystem::CreateRootSignature() {
+    // 1. Диапазон дескрипторов для 3-х текстур (t0=Diffuse, t1=Normal, t2=Displacement)
     CD3DX12_DESCRIPTOR_RANGE srvRange;
     srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
 
+    // 2. Параметры корневой сигнатуры
     CD3DX12_ROOT_PARAMETER params[2];
-    params[0].InitAsConstantBufferView(0);
+
+    // ВАЖНО: Индекс 0 должен быть CBV (константный буфер)
+    params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+
+    // Индекс 1 должен быть Descriptor Table (текстуры)
     params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
-    CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+
+    // 3. Статический сэмплер
+    CD3DX12_STATIC_SAMPLER_DESC sampler(0,
+        D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        0, 0, D3D12_COMPARISON_FUNC_ALWAYS,
+        D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK,
+        0.0f, D3D12_SHADER_VISIBILITY_ALL);
+
     CD3DX12_ROOT_SIGNATURE_DESC rsDesc(2, params, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     ComPtr<ID3DBlob> serialized, errors;
     HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
-    if (FAILED(hr)) { if (errors) OutputDebugStringA((char*)errors->GetBufferPointer()); ThrowIfFailed(hr); }
+    if (FAILED(hr)) {
+        if (errors) OutputDebugStringA((char*)errors->GetBufferPointer());
+        ThrowIfFailed(hr);
+    }
     ThrowIfFailed(m_device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature)));
 }
 
@@ -323,10 +358,10 @@ void RenderingSystem::CreateGeometryPassPSO() {
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
+
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
     psoDesc.InputLayout = { layout, _countof(layout) };
     psoDesc.pRootSignature = m_rootSignature.Get();
-
     psoDesc.VS = { m_vsBlob->GetBufferPointer(), m_vsBlob->GetBufferSize() };
     psoDesc.HS = { m_hsBlob->GetBufferPointer(), m_hsBlob->GetBufferSize() };
     psoDesc.DS = { m_dsBlob->GetBufferPointer(), m_dsBlob->GetBufferSize() };
@@ -343,10 +378,14 @@ void RenderingSystem::CreateGeometryPassPSO() {
     psoDesc.RTVFormats[2] = DXGI_FORMAT_R32G32B32A32_FLOAT;
     psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     psoDesc.SampleDesc = { 1, 0 };
+
     ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_geometryPassPSO)));
 
+    // === WIREFRAME PSO ===
     psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
-    psoDesc.RasterizerState.AntialiasedLineEnable = TRUE;
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    psoDesc.RasterizerState.AntialiasedLineEnable = FALSE; 
+    psoDesc.RasterizerState.MultisampleEnable = FALSE;
     ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_wireframePSO)));
 }
 
@@ -545,10 +584,6 @@ bool RenderingSystem::LoadStump(const std::string& path) {
     }
     m_stumpSubsets = mesh.subsets;
 
-    std::string dir;
-    size_t p = path.find_last_of("/\\");
-    if (p != std::string::npos) dir = path.substr(0, p + 1);
-
     m_stumpMaterials.clear();
     m_stumpMaterials.resize(1);
     GpuMaterial& mat = m_stumpMaterials[0];
@@ -567,7 +602,7 @@ bool RenderingSystem::LoadStump(const std::string& path) {
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Texture2D.MipLevels = 1;
 
-    // Diffuse
+    // diffuse (BaseColor)
     {
         std::wstring diffPath = L"textures/broken_stump/Broken_Stump_rkswd_High_4K_BaseColor.jpg";
         TextureLoader::TextureData td;
@@ -583,7 +618,7 @@ bool RenderingSystem::LoadStump(const std::string& path) {
         srvHandle.Offset(1, m_cbvSrvDescSize);
     }
 
-    // Normal map
+    // normal map
     {
         std::wstring normPath = L"textures/broken_stump/Broken_Stump_rkswd_High_4K_Normal.jpg";
         TextureLoader::TextureData td;
@@ -598,17 +633,19 @@ bool RenderingSystem::LoadStump(const std::string& path) {
         srvHandle.Offset(1, m_cbvSrvDescSize);
     }
 
-    //Displacement map
+    // displacement map
     {
-        std::wstring dispPath = L"textures/broken_stump/Broken_Stump_rkswd_High_4K_Displacement.jpg";
+        std::wstring dispPath = L"textures/broken_stump/DisplacementMap.png";
         TextureLoader::TextureData td;
         if (TextureLoader::LoadFromFile(dispPath, td) &&
             TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), td, mat.displacementTexture, mat.displacementUpload)) {
             srvDesc.Format = td.format;
             m_device->CreateShaderResourceView(mat.displacementTexture.Get(), &srvDesc, srvHandle);
+            OutputDebugStringA("[LoadStump] Displacement map loaded successfully (PNG)\n");
         }
         else {
             m_device->CreateShaderResourceView(m_defaultDisplacementTex.Get(), &srvDesc, srvHandle);
+            OutputDebugStringA("[LoadStump] WARNING: Displacement map FAILED to load, using default (gray=0.5)\n");
         }
     }
 
@@ -626,6 +663,7 @@ bool RenderingSystem::LoadStump(const std::string& path) {
         buf->Unmap(0, nullptr);
         return true;
         };
+
     UINT vbSz = (UINT)(verts.size() * sizeof(Vertex));
     UINT ibSz = (UINT)(mesh.indices.size() * sizeof(UINT));
     if (!upload(verts.data(), vbSz, m_stumpVertexBuffer)) {
@@ -637,10 +675,12 @@ bool RenderingSystem::LoadStump(const std::string& path) {
 
     m_stumpVbView = { m_stumpVertexBuffer->GetGPUVirtualAddress(), vbSz, sizeof(Vertex) };
     m_stumpIbView = { m_stumpIndexBuffer->GetGPUVirtualAddress(), ibSz, DXGI_FORMAT_R32_UINT };
+
     ThrowIfFailed(m_cmdList->Close());
     ID3D12CommandList* cmds[] = { m_cmdList.Get() };
     m_cmdQueue->ExecuteCommandLists(1, cmds);
     WaitForGPU();
+
     for (auto& m : m_stumpMaterials) {
         m.textureUpload.Reset();
         m.normalUpload.Reset();
@@ -806,7 +846,7 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
     m_cmdList->SetDescriptorHeaps(1, heaps);
     m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
 
-    // sponza 
+    // sponza
     m_cmdList->IASetVertexBuffers(0, 1, &m_vbView);
     m_cmdList->IASetIndexBuffer(&m_ibView);
 
@@ -823,6 +863,7 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
 
         int matIdx = (sub.materialIdx >= 0 && sub.materialIdx < (int)m_gpuMaterials.size()) ? sub.materialIdx : 0;
         const GpuMaterial& mat = m_gpuMaterials.empty() ? GpuMaterial{} : m_gpuMaterials[matIdx];
+
         UINT slotIdx = m_frameIndex * MAX_SUBSETS + (subIdx % MAX_SUBSETS);
         UINT8* slotPtr = reinterpret_cast<UINT8*>(m_cbMapped) + slotIdx * m_cbSlotSize;
         D3D12_GPU_VIRTUAL_ADDRESS cbAddr = m_constantBuffer->GetGPUVirtualAddress() + slotIdx * m_cbSlotSize;
@@ -838,11 +879,13 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
         cb.HasTexture = mat.hasTexture ? 1 : 0;
         cb.TexTilingX = m_texTiling.x;
         cb.TexTilingY = m_texTiling.y;
-        cb.TexScrollX = m_texScroll.x;  
+        cb.TexScrollX = m_texScroll.x;
         cb.TexScrollY = m_texScroll.y;
         cb.TotalTime = totalTime;
         cb.EyePosW = m_eye;
-        cb.DisplacementScale = 0.0f; 
+        cb.DisplacementScale = 0.0f;
+        cb.TessNearDist = m_tesselationNearDist;
+        cb.TessFarDist = m_tesselationFarDist;
 
         memcpy(slotPtr, &cb, sizeof(cb));
         m_cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
@@ -874,6 +917,34 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             XMMatrixTranslation(1000.0f, 100.0f, 80.0f);
         XMMATRIX stumpWit = XMMatrixTranspose(XMMatrixInverse(nullptr, stumpWorld));
 
+        XMFLOAT3 stumpPosF(1000.0f, 100.0f, 80.0f);
+        XMVECTOR stumpPos = XMLoadFloat3(&stumpPosF);
+
+        XMVECTOR eyePos = XMLoadFloat3(&m_eye);
+        XMVECTOR distVec = stumpPos - eyePos;
+        float distanceToStump = XMVector3Length(distVec).m128_f32[0];
+
+        float minDist = m_tesselationNearDist;
+        float maxDist = m_tesselationFarDist;
+        float maxTess = 32.0f;
+        float minTess = 2.0f;
+        float expectedTess = minTess;
+
+        if (distanceToStump < maxDist)
+        {
+            float tess = maxTess * max(0.0f, min(1.0f, (maxDist - distanceToStump) / (maxDist - minDist)));
+            expectedTess = max(minTess, tess);
+        }
+
+        static int frameCounter = 0;
+        if (++frameCounter % 60 == 0)
+        {
+            char debugMsg[128];
+            sprintf_s(debugMsg, "[TESS] Dist: %.0f | Factor: %.1f | Range: %.0f-%.0f\n",
+                distanceToStump, expectedTess, minDist, maxDist);
+            OutputDebugStringA(debugMsg);
+        }
+
         for (UINT subIdx = 0; subIdx < m_stumpSubsets.size(); ++subIdx)
         {
             const MeshSubset& sub = m_stumpSubsets[subIdx];
@@ -890,7 +961,7 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
             XMStoreFloat4x4(&cb.Proj, XMMatrixTranspose(proj));
             XMStoreFloat4x4(&cb.WorldInvTranspose, stumpWit);
-            cb.MaterialDiffuse = { 1.0f, 0.0f, 0.0f, 1.0f }; 
+            cb.MaterialDiffuse = { 1.0f, 0.0f, 0.0f, 1.0f };
             cb.MaterialSpecular = { 0.5f, 0.5f, 0.5f, 32.0f };
             cb.HasTexture = 1;
             cb.TexTilingX = m_texTiling.x;
@@ -899,7 +970,9 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             cb.TexScrollY = m_texScroll.y;
             cb.TotalTime = totalTime;
             cb.EyePosW = m_eye;
-            cb.DisplacementScale = 5.0f;  
+            cb.DisplacementScale = 15.0f;
+            cb.TessNearDist = m_tesselationNearDist;
+            cb.TessFarDist = m_tesselationFarDist;
 
             memcpy(slotPtr, &cb, sizeof(cb));
             m_cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
@@ -917,12 +990,10 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
                 CD3DX12_GPU_DESCRIPTOR_HANDLE nullH(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 4, m_cbvSrvDescSize);
                 m_cmdList->SetGraphicsRootDescriptorTable(1, nullH);
             }
-
             m_cmdList->DrawIndexedInstanced(sub.indexCount, 1, sub.indexStart, 0, 0);
         }
 
         m_texScroll = savedTexScroll;
-
         m_cmdList->IASetVertexBuffers(0, 1, &m_vbView);
         m_cmdList->IASetIndexBuffer(&m_ibView);
     }
@@ -1008,10 +1079,49 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
         if (!m_tKeyPressed) {
             m_wireframeMode = !m_wireframeMode;
             m_tKeyPressed = true;
+            OutputDebugStringA(m_wireframeMode ? "Wireframe: ON\n" : "Wireframe: OFF\n");
         }
     }
     else {
         m_tKeyPressed = false;
+    }
+
+    static float lastPrint = 0;
+    if (input.IsKeyDown('1')) {
+        m_tesselationNearDist = max(10.0f, m_tesselationNearDist - 10.0f);
+        if (m_totalTime - lastPrint > 0.1f) {
+            char msg[128];
+            sprintf_s(msg, "Tess Near Dist: %.1f\n", m_tesselationNearDist);
+            OutputDebugStringA(msg);
+            lastPrint = m_totalTime;
+        }
+    }
+    if (input.IsKeyDown('2')) {
+        m_tesselationNearDist += 10.0f;
+        if (m_totalTime - lastPrint > 0.1f) {
+            char msg[128];
+            sprintf_s(msg, "Tess Near Dist: %.1f\n", m_tesselationNearDist);
+            OutputDebugStringA(msg);
+            lastPrint = m_totalTime;
+        }
+    }
+    if (input.IsKeyDown('3')) {
+        m_tesselationFarDist = max(100.0f, m_tesselationFarDist - 50.0f);
+        if (m_totalTime - lastPrint > 0.1f) {
+            char msg[128];
+            sprintf_s(msg, "Tess Far Dist: %.1f\n", m_tesselationFarDist);
+            OutputDebugStringA(msg);
+            lastPrint = m_totalTime;
+        }
+    }
+    if (input.IsKeyDown('4')) {
+        m_tesselationFarDist += 50.0f;
+        if (m_totalTime - lastPrint > 0.1f) {
+            char msg[128];
+            sprintf_s(msg, "Tess Far Dist: %.1f\n", m_tesselationFarDist);
+            OutputDebugStringA(msg);
+            lastPrint = m_totalTime;
+        }
     }
 
     float moveSpeed = m_cameraSpeed * deltaTime;
