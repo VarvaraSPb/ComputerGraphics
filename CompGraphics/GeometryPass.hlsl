@@ -128,6 +128,7 @@ struct DSOutput
     float3 PosW : TEXCOORD0;
     float3 NormalW : TEXCOORD1;
     float2 TexCoord : TEXCOORD2;
+    float WaveDebug : TEXCOORD3;
 };
 
 // Domain Shader 
@@ -142,19 +143,33 @@ DSOutput DSMain(
     float3 posW = patch[0].PosW * domain.x + patch[1].PosW * domain.y + patch[2].PosW * domain.z;
     float3 normalW = patch[0].NormalW * domain.x + patch[1].NormalW * domain.y + patch[2].NormalW * domain.z;
     float2 texCoord = patch[0].TexCoord * domain.x + patch[1].TexCoord * domain.y + patch[2].TexCoord * domain.z;
-
     normalW = normalize(normalW);
-
+    
     // SDVIG PO Displacement Map
     if (gDisplacementScale > 0.0f)
     {
         float h = gDisplacementMap.SampleLevel(gSampler, texCoord, 0).r;
-        
         h = (h - 0.5f) * 2.0f;
-
         posW += (h * gDisplacementScale) * normalW;
     }
-
+    
+    if (gDisplacementScale > 0.0f)  
+    {
+        float v = texCoord.y; 
+        float waveCenter = frac(gTotalTime * 0.3f);
+        float d = v - waveCenter;
+        
+        float envelope = exp(-(d * d) / 0.04f);
+        
+        posW += (envelope * 5.0f) * normalW; 
+        
+        vout.WaveDebug = 0.0f; //envelope;
+    }
+    else
+    {
+        vout.WaveDebug = 0.0f;
+    }
+    
     vout.PosW = posW;
     float4 posV = mul(float4(posW, 1.0f), gView);
     vout.PosH = mul(posV, gProj);
@@ -175,7 +190,6 @@ struct PSOutput
 PSOutput PSMain(DSOutput pin)
 {
     PSOutput pout;
-    
     float4 albedo = gHasTexture ? gDiffuseMap.Sample(gSampler, pin.TexCoord) : gMaterialDiffuse;
     
     float3 dp1 = ddx(pin.PosW);
@@ -198,15 +212,22 @@ PSOutput PSMain(DSOutput pin)
         float3x3 TBN = float3x3(T, B, N);
         
         float3 normalMapSample = gNormalMap.Sample(gSampler, pin.TexCoord).xyz;
-        
         float3 mappedNormal = normalMapSample * 2.0f - 1.0f;
-        
         N = normalize(mul(mappedNormal, TBN));
         pout.Normal = float4(N, 1.0f);
     }
     
+    //if (pin.WaveDebug > 0.01f)
+    //{
+     //   float intensity = saturate(pin.WaveDebug * 2.0f);
+    //    pout.Albedo = lerp(albedo, float4(1.0, 0.0, 0.0, 1.0), intensity);
+   // }
+   // else
+   // {
+    //    pout.Albedo = albedo;
+   //}
     pout.Albedo = albedo;
-    pout.Position = float4(pin.PosW, 1.0f);
     
+    pout.Position = float4(pin.PosW, 1.0f);
     return pout;
 }
