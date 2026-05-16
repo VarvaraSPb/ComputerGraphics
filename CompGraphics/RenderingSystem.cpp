@@ -9,8 +9,8 @@ static void ThrowIfFailed(HRESULT hr) {
 
 RenderingSystem::~RenderingSystem()
 {
-    // Безопасная очистка: если устройство удалено (Device Removed), COM-вызовы могут падать.
-    // Оборачиваем в try-catch, чтобы деструктор не выбрасывал исключений.
+    //Safe cleanup: if delited (Device Removed), COM calls may padat'
+    // Oborachivaem in try-catch, so that the destructor doesn't throw iscluchenia
     if (m_initialized) {
         try { FlushCommandQueue(); }
         catch (...) {}
@@ -271,20 +271,17 @@ void RenderingSystem::CompileLightingShaders() {
 }
 
 void RenderingSystem::CreateRootSignature() {
-    // 1. Диапазон дескрипторов для 3-х текстур (t0=Diffuse, t1=Normal, t2=Displacement)
+    // t0=Diffuse, t1=Normal, t2=Displacement)
     CD3DX12_DESCRIPTOR_RANGE srvRange;
     srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
 
-    // 2. Параметры корневой сигнатуры
+    // params cornevoi signature
     CD3DX12_ROOT_PARAMETER params[2];
 
-    // ВАЖНО: Индекс 0 должен быть CBV (константный буфер)
     params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
 
-    // Индекс 1 должен быть Descriptor Table (текстуры)
     params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
 
-    // 3. Статический сэмплер
     CD3DX12_STATIC_SAMPLER_DESC sampler(0,
         D3D12_FILTER_MIN_MAG_MIP_LINEAR,
         D3D12_TEXTURE_ADDRESS_MODE_WRAP,
@@ -799,9 +796,17 @@ void RenderingSystem::BeginFrame(const float clearColor[4]) {
 }
 
 void RenderingSystem::DrawScene(float totalTime, float deltaTime) {
+    XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
+    float aspect = (float)m_width / (float)m_height;
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), aspect, 0.1f, 5000.f);
+    XMMATRIX viewProj = view * proj;
+
+    UpdateCulling(viewProj);
+
     if (m_useDeferredRendering) {
         AddLight();
         RenderGeometryPass(totalTime);
+        RenderRocks(totalTime);
         m_gbuffer.TransitionToRead(m_cmdList.Get());
         UpdateRainLights(deltaTime);
         RenderLightingPass();
@@ -942,7 +947,7 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             char debugMsg[128];
             sprintf_s(debugMsg, "[TESS] Dist: %.0f | Factor: %.1f | Range: %.0f-%.0f\n",
                 distanceToStump, expectedTess, minDist, maxDist);
-            OutputDebugStringA(debugMsg);
+            //OutputDebugStringA(debugMsg);
         }
 
         for (UINT subIdx = 0; subIdx < m_stumpSubsets.size(); ++subIdx)
@@ -1086,6 +1091,21 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
         m_tKeyPressed = false;
     }
 
+    if (input.IsKeyDown('F')) {
+        if (!m_cullKeyPressed) {
+            m_cullingMode = (m_cullingMode + 1) % 3;  
+            m_cullKeyPressed = true;
+
+            const char* modes[] = { "OFF", "FRUSTUM", "FRUSTUM+OCTREE" };
+            char msg[64];
+            sprintf_s(msg, "[CULLING] Mode: %s\n", modes[m_cullingMode]);
+            OutputDebugStringA(msg);
+        }
+    }
+    else {
+        m_cullKeyPressed = false;
+    }
+
     static float lastPrint = 0;
     if (input.IsKeyDown('1')) {
         m_tesselationNearDist = max(10.0f, m_tesselationNearDist - 10.0f);
@@ -1135,6 +1155,7 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
         if (m_cameraPitch < -XM_PIDIV2 + 0.1f) m_cameraPitch = -XM_PIDIV2 + 0.1f;
         if (m_cameraPitch > XM_PIDIV2 - 0.1f) m_cameraPitch = XM_PIDIV2 - 0.1f;
     }
+
     float rotateSpeed = 1.0f * deltaTime;
     if (input.IsKeyDown(VK_LEFT)) m_cameraYaw += rotateSpeed; if (input.IsKeyDown(VK_RIGHT)) m_cameraYaw -= rotateSpeed;
     if (input.IsKeyDown(VK_UP)) { m_cameraPitch += rotateSpeed; if (m_cameraPitch > XM_PIDIV2 - 0.1f) m_cameraPitch = XM_PIDIV2 - 0.1f; }
@@ -1185,3 +1206,463 @@ void RenderingSystem::MoveToNextFrame() {
 }
 
 void RenderingSystem::FlushCommandQueue() { WaitForGPU(); }
+
+// rock
+void RenderingSystem::LoadRock(const std::string& path) {
+    ThrowIfFailed(m_cmdAllocators[m_frameIndex]->Reset());
+    ThrowIfFailed(m_cmdList->Reset(m_cmdAllocators[m_frameIndex].Get(), nullptr));
+
+    ObjMesh mesh;
+    if (!ObjLoader::Load(path, mesh)) {
+        m_rockBaseBounds = DirectX::BoundingBox(XMFLOAT3(0, 0, 0), XMFLOAT3(2.0f, 1.5f, 2.0f));
+
+        m_rockMaterials.clear();
+        GpuMaterial def{};
+        def.diffuse = { 0.5f, 0.5f, 0.5f, 1.f };
+        def.hasTexture = false;
+        def.srvHeapIndex = -1;
+        m_rockMaterials.push_back(def);
+
+        ThrowIfFailed(m_cmdList->Close());
+        ID3D12CommandList* cmds[] = { m_cmdList.Get() };
+        m_cmdQueue->ExecuteCommandLists(1, cmds);
+        WaitForGPU();
+        return;
+    }
+
+    std::vector<Vertex> verts(mesh.vertices.size());
+    for (size_t i = 0; i < verts.size(); ++i) {
+        verts[i].Position = mesh.vertices[i].Position;
+        verts[i].Normal = mesh.vertices[i].Normal;
+        verts[i].TexCoord = mesh.vertices[i].TexCoord;
+    }
+    m_rockSubsets = mesh.subsets;
+
+    m_rockMaterials.clear();
+    m_rockMaterials.resize(1);
+    GpuMaterial& mat = m_rockMaterials[0];
+
+    mat.diffuse = { 0.8f, 0.8f, 0.8f, 1.0f };
+    mat.specular = { 0.5f, 0.5f, 0.5f, 1.0f };
+    mat.shininess = 32.0f;
+    mat.srvHeapIndex = m_currentSrvSlot;
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(
+        m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+        m_currentSrvSlot,
+        m_cbvSrvDescSize
+    );
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    std::wstring texPath = L"rock/testures/";
+
+    {
+        std::wstring albedoPath = texPath + L"Rock_Albedo.png";
+        TextureLoader::TextureData td;
+        if (TextureLoader::LoadFromFile(albedoPath, td) &&
+            TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), td, mat.texture, mat.textureUpload)) {
+            srvDesc.Format = td.format;
+            m_device->CreateShaderResourceView(mat.texture.Get(), &srvDesc, srvHandle);
+            mat.hasTexture = true;
+        }
+        else {
+            albedoPath = texPath + L"Rock_Albedo.png";
+            if (TextureLoader::LoadFromFile(albedoPath, td) &&
+                TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), td, mat.texture, mat.textureUpload)) {
+                srvDesc.Format = td.format;
+                m_device->CreateShaderResourceView(mat.texture.Get(), &srvDesc, srvHandle);
+                mat.hasTexture = true;
+            }
+            else {
+                m_device->CreateShaderResourceView(m_defaultDiffuseTex.Get(), &srvDesc, srvHandle);
+            }
+        }
+        srvHandle.Offset(1, m_cbvSrvDescSize);
+    }
+
+    // Normal map
+    {
+        std::wstring normalPath = texPath + L"Rock_Normal.png";
+        TextureLoader::TextureData td;
+        if (TextureLoader::LoadFromFile(normalPath, td) &&
+            TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), td, mat.normalTexture, mat.normalUpload)) {
+            srvDesc.Format = td.format;
+            m_device->CreateShaderResourceView(mat.normalTexture.Get(), &srvDesc, srvHandle);
+        }
+        else {
+            normalPath = texPath + L"Rock_Normal.png";
+            if (TextureLoader::LoadFromFile(normalPath, td) &&
+                TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), td, mat.normalTexture, mat.normalUpload)) {
+                srvDesc.Format = td.format;
+                m_device->CreateShaderResourceView(mat.normalTexture.Get(), &srvDesc, srvHandle);
+            }
+            else {
+                m_device->CreateShaderResourceView(m_defaultNormalTex.Get(), &srvDesc, srvHandle);
+            }
+        }
+        srvHandle.Offset(1, m_cbvSrvDescSize);
+    }
+
+    // Displacement/Roughness map
+    {
+        std::wstring dispPath = texPath + L"Rock_Roughness.png";
+        TextureLoader::TextureData td;
+        if (TextureLoader::LoadFromFile(dispPath, td) &&
+            TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), td, mat.displacementTexture, mat.displacementUpload)) {
+            srvDesc.Format = td.format;
+            m_device->CreateShaderResourceView(mat.displacementTexture.Get(), &srvDesc, srvHandle);
+        }
+        else {
+            dispPath = texPath + L"Rock_Roughness.png";
+            if (TextureLoader::LoadFromFile(dispPath, td) &&
+                TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), td, mat.displacementTexture, mat.displacementUpload)) {
+                srvDesc.Format = td.format;
+                m_device->CreateShaderResourceView(mat.displacementTexture.Get(), &srvDesc, srvHandle);
+            }
+            else {
+                dispPath = texPath + L"Rock_Occlusion.png";
+                if (TextureLoader::LoadFromFile(dispPath, td) &&
+                    TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), td, mat.displacementTexture, mat.displacementUpload)) {
+                    srvDesc.Format = td.format;
+                    m_device->CreateShaderResourceView(mat.displacementTexture.Get(), &srvDesc, srvHandle);
+                }
+                else {
+                    m_device->CreateShaderResourceView(m_defaultDisplacementTex.Get(), &srvDesc, srvHandle);
+                }
+            }
+        }
+    }
+
+    m_currentSrvSlot += 3;
+
+    if (!verts.empty()) {
+        XMFLOAT3 minV = verts[0].Position, maxV = verts[0].Position;
+        for (const auto& v : verts) {
+            minV.x = min(minV.x, v.Position.x); minV.y = min(minV.y, v.Position.y); minV.z = min(minV.z, v.Position.z);
+            maxV.x = max(maxV.x, v.Position.x); maxV.y = max(maxV.y, v.Position.y); maxV.z = max(maxV.z, v.Position.z);
+        }
+        XMFLOAT3 center = { (minV.x + maxV.x) * 0.5f, (minV.y + maxV.y) * 0.5f, (minV.z + maxV.z) * 0.5f };
+        XMFLOAT3 extents = { (maxV.x - minV.x) * 0.5f, (maxV.y - minV.y) * 0.5f, (maxV.z - minV.z) * 0.5f };
+        m_rockBaseBounds = DirectX::BoundingBox(center, extents);
+    }
+
+    auto uploadBuffer = [&](const void* data, UINT size, ComPtr<ID3D12Resource>& outBuffer) {
+        CD3DX12_HEAP_PROPERTIES hp(D3D12_HEAP_TYPE_UPLOAD);
+        CD3DX12_RESOURCE_DESC rd = CD3DX12_RESOURCE_DESC::Buffer(size);
+        ThrowIfFailed(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&outBuffer)));
+        void* mapped = nullptr;
+        outBuffer->Map(0, nullptr, &mapped);
+        memcpy(mapped, data, size);
+        outBuffer->Unmap(0, nullptr);
+        };
+
+    UINT vbSize = (UINT)(verts.size() * sizeof(Vertex));
+    UINT ibSize = (UINT)(mesh.indices.size() * sizeof(UINT));
+    uploadBuffer(verts.data(), vbSize, m_rockVertexBuffer);
+    uploadBuffer(mesh.indices.data(), ibSize, m_rockIndexBuffer);
+
+    m_rockVbView = { m_rockVertexBuffer->GetGPUVirtualAddress(), vbSize, sizeof(Vertex) };
+    m_rockIbView = { m_rockIndexBuffer->GetGPUVirtualAddress(), ibSize, DXGI_FORMAT_R32_UINT };
+
+    ThrowIfFailed(m_cmdList->Close());
+    ID3D12CommandList* cmds[] = { m_cmdList.Get() };
+    m_cmdQueue->ExecuteCommandLists(1, cmds);
+    WaitForGPU();
+
+    mat.textureUpload.Reset();
+    mat.normalUpload.Reset();
+    mat.displacementUpload.Reset();
+}
+
+void RenderingSystem::GenerateRocks(int count, float areaRadius) {
+    LoadRock("rock/rock.obj");
+    m_rocks.clear();
+    m_rocks.reserve(count);
+
+    std::mt19937 rng(42);
+
+    std::uniform_real_distribution<float> distX(-areaRadius, areaRadius);
+    std::uniform_real_distribution<float> distZ(-areaRadius, areaRadius);
+    std::uniform_real_distribution<float> distY(-1.5f, -0.5f); 
+    std::uniform_real_distribution<float> distScale(0.15f, 0.6f);
+    std::uniform_real_distribution<float> distRot(0.0f, XM_PI * 2.0f);
+
+    for (int i = 0; i < count; ++i) {
+        float scale = distScale(rng);
+        float rot = distRot(rng);
+
+        XMFLOAT3 pos(distX(rng), distY(rng), distZ(rng));
+
+        XMMATRIX world = XMMatrixScaling(scale, scale, scale) *
+            XMMatrixRotationY(rot) *
+            XMMatrixTranslation(pos.x, pos.y, pos.z);
+
+        RockInstance rock{};
+        rock.World = world;
+
+        XMFLOAT3 minPt(
+            m_rockBaseBounds.Center.x - m_rockBaseBounds.Extents.x,
+            m_rockBaseBounds.Center.y - m_rockBaseBounds.Extents.y,
+            m_rockBaseBounds.Center.z - m_rockBaseBounds.Extents.z
+        );
+        XMFLOAT3 maxPt(
+            m_rockBaseBounds.Center.x + m_rockBaseBounds.Extents.x,
+            m_rockBaseBounds.Center.y + m_rockBaseBounds.Extents.y,
+            m_rockBaseBounds.Center.z + m_rockBaseBounds.Extents.z
+        );
+
+        XMVECTOR vertices[8];
+        vertices[0] = XMVectorSet(minPt.x, minPt.y, minPt.z, 1.0f);
+        vertices[1] = XMVectorSet(minPt.x, minPt.y, maxPt.z, 1.0f);
+        vertices[2] = XMVectorSet(minPt.x, maxPt.y, minPt.z, 1.0f);
+        vertices[3] = XMVectorSet(minPt.x, maxPt.y, maxPt.z, 1.0f);
+        vertices[4] = XMVectorSet(maxPt.x, minPt.y, minPt.z, 1.0f);
+        vertices[5] = XMVectorSet(maxPt.x, minPt.y, maxPt.z, 1.0f);
+        vertices[6] = XMVectorSet(maxPt.x, maxPt.y, minPt.z, 1.0f);
+        vertices[7] = XMVectorSet(maxPt.x, maxPt.y, maxPt.z, 1.0f);
+
+        XMVECTOR vMin = XMVectorReplicate(FLT_MAX);
+        XMVECTOR vMax = XMVectorReplicate(-FLT_MAX);
+
+        for (int j = 0; j < 8; ++j) {
+            XMVECTOR v = XMVector3Transform(vertices[j], world);
+            vMin = XMVectorMin(vMin, v);
+            vMax = XMVectorMax(vMax, v);
+        }
+
+        rock.Bounds.Center = XMFLOAT3(
+            (XMVectorGetX(vMin) + XMVectorGetX(vMax)) * 0.5f,
+            (XMVectorGetY(vMin) + XMVectorGetY(vMax)) * 0.5f,
+            (XMVectorGetZ(vMin) + XMVectorGetZ(vMax)) * 0.5f
+        );
+        rock.Bounds.Extents = XMFLOAT3(
+            (XMVectorGetX(vMax) - XMVectorGetX(vMin)) * 0.5f,
+            (XMVectorGetY(vMax) - XMVectorGetY(vMin)) * 0.5f,
+            (XMVectorGetZ(vMax) - XMVectorGetZ(vMin)) * 0.5f
+        );
+
+        m_rocks.push_back(rock);
+    }
+
+    BuildOctree();
+    OutputDebugStringA(("Generated " + std::to_string(count) + " rocks (Wide Field). Octree built.\n").c_str());
+}
+
+void RenderingSystem::BuildOctree() {
+    if (m_rocks.empty()) return;
+
+    std::vector<size_t> allIndices(m_rocks.size());
+    std::iota(allIndices.begin(), allIndices.end(), 0);
+
+    m_octree = std::make_unique<OctreeNode>();
+    BuildOctreeRecursive(*m_octree, allIndices, 0, 5); 
+}
+
+void RenderingSystem::BuildOctreeRecursive(OctreeNode& node, const std::vector<size_t>& indices, int depth, int maxDepth) {
+    if (indices.empty()) return;
+
+    DirectX::BoundingBox nodeBounds = m_rocks[indices[0]].Bounds;
+    for (size_t i = 1; i < indices.size(); ++i) {
+        DirectX::BoundingBox::CreateMerged(nodeBounds, nodeBounds, m_rocks[indices[i]].Bounds);
+    }
+
+    node.Bounds = nodeBounds;
+
+    if (indices.size() <= 4 || depth >= maxDepth) {
+        node.Indices = indices;
+        node.IsLeaf = true;
+        return;
+    }
+
+    node.IsLeaf = false;
+    XMFLOAT3 center = nodeBounds.Center;
+    XMFLOAT3 minB = { center.x - nodeBounds.Extents.x, center.y - nodeBounds.Extents.y, center.z - nodeBounds.Extents.z };
+    XMFLOAT3 maxB = { center.x + nodeBounds.Extents.x, center.y + nodeBounds.Extents.y, center.z + nodeBounds.Extents.z };
+
+    for (int i = 0; i < 8; ++i) {
+        XMFLOAT3 childMin = {
+            (i & 1) ? center.x : minB.x,
+            (i & 2) ? center.y : minB.y,
+            (i & 4) ? center.z : minB.z
+        };
+        XMFLOAT3 childMax = {
+            (i & 1) ? maxB.x : center.x,
+            (i & 2) ? maxB.y : center.y,
+            (i & 4) ? maxB.z : center.z
+        };
+
+        DirectX::BoundingBox childBounds{
+            XMFLOAT3((childMin.x + childMax.x) * 0.5f, (childMin.y + childMax.y) * 0.5f, (childMin.z + childMax.z) * 0.5f),
+            XMFLOAT3((childMax.x - childMin.x) * 0.5f, (childMax.y - childMin.y) * 0.5f, (childMax.z - childMin.z) * 0.5f)
+        };
+
+        std::vector<size_t> childIndices;
+        for (size_t idx : indices) {
+            if (childBounds.Intersects(m_rocks[idx].Bounds) != DirectX::DISJOINT)
+                childIndices.push_back(idx);
+        }
+
+        if (!childIndices.empty()) {
+            node.Children[i] = std::make_unique<OctreeNode>();
+            BuildOctreeRecursive(*node.Children[i], childIndices, depth + 1, maxDepth);
+        }
+    }
+}
+
+void RenderingSystem::UpdateCulling(const XMMATRIX& viewProj)
+{
+    m_visibleRocks.clear();
+
+    if (m_cullingMode == 0) {
+        m_visibleRocks.reserve(m_rocks.size());
+        for (size_t i = 0; i < m_rocks.size(); ++i)
+            m_visibleRocks.push_back(i);
+        return;
+    }
+
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), (float)m_width / m_height, 0.1f, 5000.f);
+    BoundingFrustum frustumView;
+    BoundingFrustum::CreateFromMatrix(frustumView, proj);
+
+    XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
+    XMMATRIX invView = XMMatrixInverse(nullptr, view);
+
+    BoundingFrustum frustumWorld;
+    frustumView.Transform(frustumWorld, invView);
+
+    if (m_cullingMode == 1) {
+        for (size_t i = 0; i < m_rocks.size(); ++i) {
+            if (frustumWorld.Intersects(m_rocks[i].Bounds) != DirectX::DISJOINT) {
+                m_visibleRocks.push_back(i);
+            }
+        }
+    }
+    else if (m_cullingMode == 2 && m_octree) {
+        CullOctreeRecursive(m_octree.get(), frustumWorld);
+        std::sort(m_visibleRocks.begin(), m_visibleRocks.end());
+        m_visibleRocks.erase(std::unique(m_visibleRocks.begin(), m_visibleRocks.end()), m_visibleRocks.end());
+    }
+}
+
+void RenderingSystem::CullOctreeRecursive(const OctreeNode* node, const DirectX::BoundingFrustum& frustum)
+{
+    if (!node) return;
+
+    if (frustum.Intersects(node->Bounds) == DirectX::DISJOINT)
+        return;
+
+    if (node->IsLeaf)
+    {
+        for (size_t idx : node->Indices) {
+            if (frustum.Intersects(m_rocks[idx].Bounds) != DirectX::DISJOINT) {
+                m_visibleRocks.push_back(idx);
+            }
+        }
+    }
+    else
+    {
+        for (const auto& child : node->Children) {
+            if (child) {
+                CullOctreeRecursive(child.get(), frustum);
+            }
+        }
+    }
+}
+
+void RenderingSystem::RenderRocks(float totalTime) {
+    if (m_rocks.empty() || m_visibleRocks.empty() || !m_rockVertexBuffer.Get()) return;
+
+    //if (m_visibleRocks.size() > 500) {
+    //    m_visibleRocks.resize(500);
+    //    OutputDebugStringA("[RenderRocks] Limited to 500 to prevent TDR\n");
+    //}
+
+    XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
+    float aspect = (float)m_width / (float)m_height;
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), aspect, 0.1f, 5000.f);
+
+    m_cmdList->SetPipelineState(m_geometryPassPSO.Get());
+    m_cmdList->SetGraphicsRootSignature(m_rootSignature.Get());
+    ID3D12DescriptorHeap* heaps[] = { m_cbvSrvHeap.Get() };
+    m_cmdList->SetDescriptorHeaps(1, heaps);
+
+    m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+    m_cmdList->IASetVertexBuffers(0, 1, &m_rockVbView);
+    m_cmdList->IASetIndexBuffer(&m_rockIbView);
+
+    const UINT ROCK_CBV_OFFSET = MAX_SUBSETS / 2;
+
+    for (size_t i : m_visibleRocks) {
+        const auto& rock = m_rocks[i];
+        XMMATRIX worldInvTranspose = XMMatrixTranspose(XMMatrixInverse(nullptr, rock.World));
+        XMMATRIX worldT = XMMatrixTranspose(rock.World);
+
+        UINT slotIdx = m_frameIndex * MAX_SUBSETS + ROCK_CBV_OFFSET + (i % (MAX_SUBSETS / 2));
+        UINT8* slotPtr = reinterpret_cast<UINT8*>(m_cbMapped) + slotIdx * m_cbSlotSize;
+        D3D12_GPU_VIRTUAL_ADDRESS cbAddr = m_constantBuffer->GetGPUVirtualAddress() + slotIdx * m_cbSlotSize;
+
+        ConstantBufferData cb{};
+        XMStoreFloat4x4(&cb.World, worldT);
+        XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
+        XMStoreFloat4x4(&cb.Proj, XMMatrixTranspose(proj));
+        XMStoreFloat4x4(&cb.WorldInvTranspose, worldInvTranspose);
+
+        cb.MaterialDiffuse = m_rockMaterials[0].diffuse;
+        cb.MaterialSpecular = m_rockMaterials[0].specular;
+        cb.MaterialSpecular.w = 32.0f;
+        cb.HasTexture = m_rockMaterials[0].hasTexture ? 1 : 0;
+
+        cb.TexTilingX = 1.0f;  
+        cb.TexTilingY = 1.0f;
+        cb.TexScrollX = 0.0f;  
+        cb.TexScrollY = 0.0f;
+
+        cb.TotalTime = totalTime;
+        cb.EyePosW = m_eye;
+        cb.DisplacementScale = 0.0f; 
+        cb.TessNearDist = m_tesselationNearDist;
+        cb.TessFarDist = m_tesselationFarDist;
+
+        memcpy(slotPtr, &cb, sizeof(cb));
+        m_cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+
+        if (m_rockMaterials.size() > 0 && m_rockMaterials[0].srvHeapIndex >= 0) {
+            UINT maxDesc = m_cbvSrvHeap->GetDesc().NumDescriptors;
+            if ((UINT)m_rockMaterials[0].srvHeapIndex < maxDesc) {
+                CD3DX12_GPU_DESCRIPTOR_HANDLE srvH(
+                    m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+                    m_rockMaterials[0].srvHeapIndex, m_cbvSrvDescSize);
+                m_cmdList->SetGraphicsRootDescriptorTable(1, srvH);
+            }
+        }
+        else {
+            CD3DX12_GPU_DESCRIPTOR_HANDLE nullH(
+                m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 4, m_cbvSrvDescSize);
+            m_cmdList->SetGraphicsRootDescriptorTable(1, nullH);
+        }
+
+        for (const auto& sub : m_rockSubsets)
+            m_cmdList->DrawIndexedInstanced(sub.indexCount, 1, sub.indexStart, 0, 0);
+    }
+
+    static int lastPrintedMode = -1;
+    static int debugFrame = 0;
+
+    if (m_cullingMode != lastPrintedMode) {
+        lastPrintedMode = m_cullingMode;
+        debugFrame = 0;
+    }
+
+    if (++debugFrame % 30 == 0) { 
+        const char* modes[] = { "OFF", "FRUSTUM", "FRUSTUM+OCTREE" };
+        char msg[128];
+        sprintf_s(msg, "[CULLING] Visible: %zu | Total: %zu | Mode: %s\n",
+            m_visibleRocks.size(), m_rocks.size(), modes[m_cullingMode]);
+        OutputDebugStringA(msg);
+    }
+}

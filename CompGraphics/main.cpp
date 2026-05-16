@@ -34,6 +34,9 @@ public:
             OutputDebugStringA("Stump LoadObj returned FAILED\n");
         }
         OutputDebugStringA("=========================\n");
+
+        m_renderingSystem.GenerateRocks(650, 1200.0f);
+
         AddTestLights();
 
         m_timer.Reset();

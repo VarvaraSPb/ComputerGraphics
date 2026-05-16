@@ -85,7 +85,7 @@ HS_CONSTANT_DATA_OUTPUT CalcHSPatchConstants(
     float maxDist = gTessFarDist;
     
     float maxTess = 16.0f;
-    float minTess = 2.0f;
+    float minTess = 1.0f;
     
     float tessFactor = minTess;
     if (dist < maxDist)
@@ -106,7 +106,7 @@ HS_CONSTANT_DATA_OUTPUT CalcHSPatchConstants(
 }
 
 [domain("tri")]
-[partitioning("fractional_even")] 
+[partitioning("fractional_even")]
 [outputtopology("triangle_cw")]
 [outputcontrolpoints(3)]
 [patchconstantfunc("CalcHSPatchConstants")]
@@ -153,15 +153,15 @@ DSOutput DSMain(
         posW += (h * gDisplacementScale) * normalW;
     }
     
-    if (gDisplacementScale > 0.0f)  
+    if (gDisplacementScale > 0.0f)
     {
-        float v = texCoord.y; 
+        float v = texCoord.y;
         float waveCenter = frac(gTotalTime * 0.3f);
         float d = v - waveCenter;
         
         float envelope = exp(-(d * d) / 0.04f);
         
-        posW += (envelope * 5.0f) * normalW; 
+        posW += (envelope * 5.0f) * normalW;
         
         vout.WaveDebug = 0.0f; //envelope;
     }

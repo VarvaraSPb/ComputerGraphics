@@ -10,6 +10,10 @@
 #include <vector>
 #include <array>
 #include <algorithm>
+#include <DirectXCollision.h>
+#include <memory>
+#include <numeric>
+#include <random>
 #include "d3dx12.h"
 #include "OBJLoader.h"
 #include "TextureLoader.h"
@@ -49,6 +53,7 @@ struct alignas(256) ConstantBufferData {
     float TessNearDist;
     float TessFarDist;
     XMFLOAT2 Pad2;
+
 };
 
 struct GpuMaterial {
@@ -87,6 +92,18 @@ struct alignas(256) LightBufferData {
     XMFLOAT4 EyePos;
 };
 
+struct RockInstance {
+    XMMATRIX World;
+    DirectX::BoundingBox Bounds;
+};
+
+struct OctreeNode {
+    DirectX::BoundingBox Bounds;
+    std::vector<size_t> Indices;
+    std::array<std::unique_ptr<OctreeNode>, 8> Children;
+    bool IsLeaf = true;
+};
+
 class RenderingSystem
 {
 public:
@@ -110,6 +127,7 @@ public:
     void SetTexScroll(float x, float y) { m_texScroll = { x, y }; }
     void UpdateCamera(float deltaTime, const InputDevice& input);
     void SetDeferredRendering(bool enable) { m_useDeferredRendering = enable; }
+    void GenerateRocks(int count, float spawnRadius); 
 
 private:
     void CreateDevice();
@@ -147,6 +165,13 @@ private:
     void FlushCommandQueue();
     void MoveToNextFrame();
     float GetVerticalAngle() const;
+
+    void LoadRock(const std::string& path);
+    void BuildOctree();
+    void BuildOctreeRecursive(OctreeNode& node, const std::vector<size_t>& indices, int depth, int maxDepth);
+    void UpdateCulling(const XMMATRIX& viewProj);
+    void CullOctreeRecursive(const OctreeNode* node, const DirectX::BoundingFrustum& frustum);
+    void RenderRocks(float totalTime);
 
     ComPtr<ID3D12Device> m_device;
     ComPtr<IDXGIFactory6> m_factory;
@@ -244,4 +269,17 @@ private:
     
     float m_tesselationNearDist = 200.0f;  
     float m_tesselationFarDist = 1500.0f;  
+
+    std::vector<RockInstance> m_rocks;
+    DirectX::BoundingBox m_rockBaseBounds;
+    std::unique_ptr<OctreeNode> m_octree;
+    std::vector<size_t> m_visibleRocks;
+    int m_cullingMode = 0;  
+    bool m_cullKeyPressed = false;
+    ComPtr<ID3D12Resource> m_rockVertexBuffer;
+    ComPtr<ID3D12Resource> m_rockIndexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW m_rockVbView{};
+    D3D12_INDEX_BUFFER_VIEW m_rockIbView{};
+    std::vector<MeshSubset> m_rockSubsets;
+    std::vector<GpuMaterial> m_rockMaterials;
 };
