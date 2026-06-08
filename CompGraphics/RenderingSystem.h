@@ -37,23 +37,18 @@ struct alignas(256) ConstantBufferData {
     XMFLOAT4X4 WorldInvTranspose;
     XMFLOAT4 MaterialDiffuse;
     XMFLOAT4 MaterialSpecular;
-
     int HasTexture;
     float TexTilingX;
     float TexTilingY;
     float TotalTime;
-
     float TexScrollX;
     float TexScrollY;
     XMFLOAT2 Pad1;
-
     XMFLOAT3 EyePosW;
     float DisplacementScale;
-
     float TessNearDist;
     float TessFarDist;
     XMFLOAT2 Pad2;
-
 };
 
 struct GpuMaterial {
@@ -63,7 +58,6 @@ struct GpuMaterial {
     ComPtr<ID3D12Resource> normalUpload;
     ComPtr<ID3D12Resource> displacementTexture;
     ComPtr<ID3D12Resource> displacementUpload;
-
     int srvHeapIndex = -1;
     XMFLOAT4 diffuse = { 0.8f, 0.8f, 0.8f, 1.f };
     XMFLOAT4 specular = { 0.5f, 0.5f, 0.5f, 1.f };
@@ -122,12 +116,11 @@ public:
     void OnResize(int width, int height);
     bool LoadObj(const std::string& path);
     bool LoadStump(const std::string& path);
-
     void SetTexTiling(float x, float y) { m_texTiling = { x, y }; }
     void SetTexScroll(float x, float y) { m_texScroll = { x, y }; }
     void UpdateCamera(float deltaTime, const InputDevice& input);
     void SetDeferredRendering(bool enable) { m_useDeferredRendering = enable; }
-    void GenerateRocks(int count, float spawnRadius); 
+    void GenerateRocks(int count, float spawnRadius);
 
 private:
     void CreateDevice();
@@ -154,7 +147,6 @@ private:
     void CreateRainLightBuffer();
     void CreateRainLightSRV();
     void CreateDefaultTextures();
-
     void RenderGeometryPass(float totalTime);
     void RenderLightingPass();
     void RenderForwardPass(float totalTime);
@@ -165,7 +157,6 @@ private:
     void FlushCommandQueue();
     void MoveToNextFrame();
     float GetVerticalAngle() const;
-
     void LoadRock(const std::string& path);
     void BuildOctree();
     void BuildOctreeRecursive(OctreeNode& node, const std::vector<size_t>& indices, int depth, int maxDepth);
@@ -173,6 +164,72 @@ private:
     void CullOctreeRecursive(const OctreeNode* node, const DirectX::BoundingFrustum& frustum);
     void RenderRocks(float totalTime);
 
+    // particles
+    static constexpr UINT MAX_PARTICLES = 5000;
+    // Слоты частиц вынесены за пределы области текстур материалов (раньше 95 затирался Sponza).
+    static constexpr UINT PARTICLE_CB_OFFSET = 150 + (MAX_TEXTURES * 3); // = 534
+
+    struct Particle {
+        DirectX::XMFLOAT3 position;
+        DirectX::XMFLOAT3 velocity;
+        float lifetime;
+        float size;
+        DirectX::XMFLOAT4 color;
+        uint32_t isActive;
+        uint32_t pad[3];
+    };
+
+    struct alignas(256) ParticleUpdateCB {
+        DirectX::XMFLOAT3 gGravity;       float gDeltaTime;
+        float gSpawnRate;                 float gMaxLifetime;
+        float _pad0;                      float _pad1;
+        DirectX::XMFLOAT3 gSpawnMin;      float _pad2;
+        DirectX::XMFLOAT3 gSpawnMax;      float _pad3;
+        float gTotalTime;                 float gWindStrength;
+        float _pad4;                      float _pad5;
+        DirectX::XMFLOAT3 gWindDirection; uint32_t gMaxParticles;
+        uint32_t gSeed;                   float _pad6[3];
+    };
+
+    struct alignas(256) ParticleRenderCB {
+        DirectX::XMFLOAT4X4 gView;
+        DirectX::XMFLOAT4X4 gProj;
+        DirectX::XMFLOAT3 gCameraPos;
+        float _pad;
+    };
+
+    // Ресурсы частиц
+    ComPtr<ID3D12Resource> m_particleBufferAppend;
+    ComPtr<ID3D12Resource> m_particleBufferConsume;
+    ComPtr<ID3D12Resource> m_particleUploadBuffer;
+    ComPtr<ID3D12Resource> m_particleUpdateCB;
+    ComPtr<ID3D12Resource> m_particleRenderCB;
+    ParticleUpdateCB* m_particleUpdateCBData = nullptr;
+    ParticleRenderCB* m_particleRenderCBData = nullptr;
+
+    UINT m_particleDescStart = PARTICLE_CB_OFFSET;
+
+    ComPtr<ID3D12RootSignature> m_particleComputeRootSig;
+    ComPtr<ID3D12PipelineState> m_particleComputePSO;
+    ComPtr<ID3DBlob> m_particleCSBlob;
+
+    ComPtr<ID3D12RootSignature> m_particleRenderRootSig;
+    ComPtr<ID3D12PipelineState> m_particleRenderPSO;
+    ComPtr<ID3DBlob> m_particleVSBlob;
+    ComPtr<ID3DBlob> m_particleGSBlob;
+    ComPtr<ID3DBlob> m_particlePSBlob;
+
+    bool m_isAppendActive = true;
+
+    // Методы системы частиц
+    void CompileParticleShaders();
+    void CreateParticleResources();
+    void CreateParticleRootSignatures();
+    void CreateParticlePSOs();
+    void UpdateParticles(float deltaTime, float totalTime);
+    void RenderParticles();
+
+    // Остальные поля
     ComPtr<ID3D12Device> m_device;
     ComPtr<IDXGIFactory6> m_factory;
     ComPtr<ID3D12CommandQueue> m_cmdQueue;
@@ -189,49 +246,40 @@ private:
     ComPtr<ID3D12Fence> m_fence;
     UINT64 m_fenceValues[FRAME_COUNT]{};
     HANDLE m_fenceEvent = nullptr;
-
     ComPtr<ID3D12RootSignature> m_rootSignature;
     ComPtr<ID3D12PipelineState> m_pso;
     ComPtr<ID3DBlob> m_vsBlob;
     ComPtr<ID3DBlob> m_psBlob;
-
     ComPtr<ID3DBlob> m_hsBlob;
     ComPtr<ID3DBlob> m_dsBlob;
-
     ComPtr<ID3D12PipelineState> m_geometryPassPSO;
     ComPtr<ID3D12PipelineState> m_wireframePSO;
     ComPtr<ID3D12PipelineState> m_lightingPassPSO;
     ComPtr<ID3D12RootSignature> m_lightingRootSignature;
     ComPtr<ID3DBlob> m_lightingVSBlob;
     ComPtr<ID3DBlob> m_lightingPSBlob;
-
     ComPtr<ID3D12Resource> m_vertexBuffer;
     ComPtr<ID3D12Resource> m_indexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_vbView{};
     D3D12_INDEX_BUFFER_VIEW m_ibView{};
     std::vector<MeshSubset> m_subsets;
     std::vector<GpuMaterial> m_gpuMaterials;
-
     ComPtr<ID3D12Resource> m_stumpVertexBuffer;
     ComPtr<ID3D12Resource> m_stumpIndexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_stumpVbView{};
     D3D12_INDEX_BUFFER_VIEW m_stumpIbView{};
     std::vector<MeshSubset> m_stumpSubsets;
     std::vector<GpuMaterial> m_stumpMaterials;
-
     ComPtr<ID3D12Resource> m_defaultDiffuseTex;
     ComPtr<ID3D12Resource> m_defaultNormalTex;
     ComPtr<ID3D12Resource> m_defaultDisplacementTex;
     ComPtr<ID3D12Resource> m_defaultDiffuseUpload;
     ComPtr<ID3D12Resource> m_defaultNormalUpload;
     ComPtr<ID3D12Resource> m_defaultDisplacementUpload;
-
     UINT m_currentSrvSlot = 7;
-
     ComPtr<ID3D12Resource> m_constantBuffer;
     ConstantBufferData* m_cbMapped = nullptr;
     UINT m_cbSlotSize = 0;
-
     ComPtr<ID3D12Resource> m_lightBuffer;
     LightBufferData* m_lightMappedData = nullptr;
     ComPtr<ID3D12Resource> m_pointLightBuffer;
@@ -244,12 +292,10 @@ private:
     XMFLOAT3 m_spawnAreaMax{ 750.f, 30.f, 300.f };
     float m_floorY = -1.5f;
     UINT m_activeLightCount = 0;
-
     Gbuffer m_gbuffer;
     ComPtr<ID3D12Resource> m_depthStencil;
     ComPtr<ID3D12Resource> m_screenQuadVB;
     D3D12_VERTEX_BUFFER_VIEW m_screenQuadVBView{};
-
     XMFLOAT2 m_texTiling = { 1.f, 1.f };
     XMFLOAT2 m_texScroll = { 0.05f, 0.f };
     int m_width = 0;
@@ -263,21 +309,20 @@ private:
     float m_totalTime = 0.0f;
     bool m_initialized = false;
     bool m_useDeferredRendering = true;
-
     bool m_wireframeMode = false;
     bool m_tKeyPressed = false;
-    
-    float m_tesselationNearDist = 200.0f;  
-    float m_tesselationFarDist = 1500.0f;  
-
+    float m_tesselationNearDist = 200.0f;
+    float m_tesselationFarDist = 1500.0f;
     std::vector<RockInstance> m_rocks;
     DirectX::BoundingBox m_rockBaseBounds;
     std::unique_ptr<OctreeNode> m_octree;
     std::vector<size_t> m_visibleRocks;
-    int m_cullingMode = 0;  
+    int m_cullingMode = 0;
     bool m_cullKeyPressed = false;
     ComPtr<ID3D12Resource> m_rockVertexBuffer;
     ComPtr<ID3D12Resource> m_rockIndexBuffer;
+    ComPtr<ID3D12Resource> m_particleCounterAppend;
+    ComPtr<ID3D12Resource> m_particleCounterConsume;
     D3D12_VERTEX_BUFFER_VIEW m_rockVbView{};
     D3D12_INDEX_BUFFER_VIEW m_rockIbView{};
     std::vector<MeshSubset> m_rockSubsets;
