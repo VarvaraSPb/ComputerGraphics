@@ -98,6 +98,24 @@ struct OctreeNode {
     bool IsLeaf = true;
 };
 
+struct alignas(256) ShadowCBData {
+    XMFLOAT4X4 LightViewProj[4];    
+    XMFLOAT4 CascadeSplits;         
+    XMFLOAT4 LightDir;               
+    XMFLOAT4 LightPos;               
+    XMFLOAT4 ShadowMapSize;          
+    float ShadowBias;                
+    float PCFRadius;                 
+    float Padding[2];
+};
+
+struct CascadeData {
+    XMMATRIX ViewProj;               
+    float SplitDistance;           
+    float NearPlane;                 
+    float FarPlane;                  
+};
+
 class RenderingSystem
 {
 public:
@@ -105,6 +123,9 @@ public:
     static constexpr UINT MAX_TEXTURES = 128;
     static constexpr UINT MAX_SUBSETS = 512;
     static constexpr UINT MAX_RAIN_LIGHTS = 300;
+
+    static constexpr UINT MAX_CASCADES = 4;
+    static constexpr UINT SHADOW_MAP_SIZE = 4096;
 
     RenderingSystem() = default;
     ~RenderingSystem();
@@ -164,10 +185,18 @@ private:
     void CullOctreeRecursive(const OctreeNode* node, const DirectX::BoundingFrustum& frustum);
     void RenderRocks(float totalTime);
 
+    void CreateShadowMapResources();
+    void RenderShadowMap(const XMMATRIX& lightViewProj, int cascadeIndex);
+    void RenderGeometryForShadowMap(const XMMATRIX& viewProj);
+    void UpdateCascades(const XMMATRIX& view, const XMMATRIX& proj, const XMFLOAT3& lightDir);
+    void UpdateShadowConstantBuffer();
+    void CreateShadowMapPSO();
+    void CompileShadowShaders();
+    void CreateShadowMapRootSignature();
+
     // particles
     static constexpr UINT MAX_PARTICLES = 5000;
-    // Слоты частиц вынесены за пределы области текстур материалов (раньше 95 затирался Sponza).
-    static constexpr UINT PARTICLE_CB_OFFSET = 150 + (MAX_TEXTURES * 3); // = 534
+    static constexpr UINT PARTICLE_CB_OFFSET = 150 + (MAX_TEXTURES * 3) + (MAX_CASCADES * 2) + 16; // = 534 + 8 + 16 = 558
 
     struct Particle {
         DirectX::XMFLOAT3 position;
@@ -198,7 +227,6 @@ private:
         float _pad;
     };
 
-    // Ресурсы частиц
     ComPtr<ID3D12Resource> m_particleBufferAppend;
     ComPtr<ID3D12Resource> m_particleBufferConsume;
     ComPtr<ID3D12Resource> m_particleUploadBuffer;
@@ -221,7 +249,6 @@ private:
 
     bool m_isAppendActive = true;
 
-    // Методы системы частиц
     void CompileParticleShaders();
     void CreateParticleResources();
     void CreateParticleRootSignatures();
@@ -229,7 +256,31 @@ private:
     void UpdateParticles(float deltaTime, float totalTime);
     void RenderParticles();
 
-    // Остальные поля
+    ComPtr<ID3D12Resource> m_shadowMaps[MAX_CASCADES];
+    ComPtr<ID3D12Resource> m_shadowCB;
+    ShadowCBData* m_shadowCBData = nullptr;
+    CascadeData m_cascades[MAX_CASCADES];
+    float m_cascadeSplits[MAX_CASCADES];
+    int m_numCascades = 3;
+    XMFLOAT3 m_lightDir = { -0.5f, -1.0f, -0.3f };
+    float m_shadowBias = 0.0015f;
+    float m_pcfRadius = 2.0f;
+    UINT m_shadowMapSRVStart = 0;
+    UINT m_shadowMapDSVStart = 1;
+
+    // shadow map PSO
+    ComPtr<ID3D12PipelineState> m_shadowMapPSO;
+    ComPtr<ID3D12RootSignature> m_shadowMapRootSig;
+    ComPtr<ID3DBlob> m_shadowVSBlob;
+    ComPtr<ID3DBlob> m_shadowPSBlob;
+
+    ComPtr<ID3D12Resource> m_shadowMapCB;
+    struct ShadowMapCBData {
+        XMFLOAT4X4 WorldViewProj;
+    };
+    ShadowMapCBData* m_shadowMapCBData = nullptr;
+    // end
+    
     ComPtr<ID3D12Device> m_device;
     ComPtr<IDXGIFactory6> m_factory;
     ComPtr<ID3D12CommandQueue> m_cmdQueue;
@@ -264,6 +315,13 @@ private:
     D3D12_INDEX_BUFFER_VIEW m_ibView{};
     std::vector<MeshSubset> m_subsets;
     std::vector<GpuMaterial> m_gpuMaterials;
+
+    ComPtr<ID3D12Resource> m_shadowVB;
+    ComPtr<ID3D12Resource> m_shadowIB;
+    D3D12_VERTEX_BUFFER_VIEW m_shadowVbView{};
+    D3D12_INDEX_BUFFER_VIEW m_shadowIbView{};
+    std::vector<MeshSubset> m_shadowSubsets;
+
     ComPtr<ID3D12Resource> m_stumpVertexBuffer;
     ComPtr<ID3D12Resource> m_stumpIndexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_stumpVbView{};
@@ -284,7 +342,9 @@ private:
     LightBufferData* m_lightMappedData = nullptr;
     ComPtr<ID3D12Resource> m_pointLightBuffer;
     PointLight* m_pointLightsMapped = nullptr;
-    struct RainLight { PointLight data; bool active = false; XMFLOAT3 velocity{ 0.f, -200.f, 0.f }; float lifeTime = 0.f; };
+    struct RainLight { PointLight data; bool active = false; 
+    XMFLOAT3 velocity{ 0.f, -200.f, 0.f }; 
+    float lifeTime = 0.f; };
     std::vector<RainLight> m_rainLights;
     float m_spawnTimer = 0.f;
     float m_spawnInterval = 0.005f;
