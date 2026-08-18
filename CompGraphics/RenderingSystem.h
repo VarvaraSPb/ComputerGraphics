@@ -99,21 +99,21 @@ struct OctreeNode {
 };
 
 struct alignas(256) ShadowCBData {
-    XMFLOAT4X4 LightViewProj[4];    
-    XMFLOAT4 CascadeSplits;         
-    XMFLOAT4 LightDir;               
-    XMFLOAT4 LightPos;               
-    XMFLOAT4 ShadowMapSize;          
-    float ShadowBias;                
-    float PCFRadius;                 
+    XMFLOAT4X4 LightViewProj[4];
+    XMFLOAT4 CascadeSplits;
+    XMFLOAT4 LightDir;
+    XMFLOAT4 LightPos;
+    XMFLOAT4 ShadowMapSize;
+    float ShadowBias;
+    float PCFRadius;
     float Padding[2];
 };
 
 struct CascadeData {
-    XMMATRIX ViewProj;               
-    float SplitDistance;           
-    float NearPlane;                 
-    float FarPlane;                  
+    XMMATRIX ViewProj;
+    float SplitDistance;
+    float NearPlane;
+    float FarPlane;
 };
 
 class RenderingSystem
@@ -142,6 +142,10 @@ public:
     void UpdateCamera(float deltaTime, const InputDevice& input);
     void SetDeferredRendering(bool enable) { m_useDeferredRendering = enable; }
     void GenerateRocks(int count, float spawnRadius);
+    void SetMotionBlurIntensity(float intensity) { m_motionBlurIntensity = intensity; }
+    void SetMotionBlurSamples(float samples) { m_motionBlurSamples = samples; }
+    void SetBloomIntensity(float intensity) { m_bloomIntensity = intensity; }
+    void SetPostEffectMode(int mode) { m_postEffectMode = mode; } 
 
 private:
     void CreateDevice();
@@ -197,6 +201,8 @@ private:
     // particles
     static constexpr UINT MAX_PARTICLES = 5000;
     static constexpr UINT PARTICLE_CB_OFFSET = 150 + (MAX_TEXTURES * 3) + (MAX_CASCADES * 2) + 16; // = 534 + 8 + 16 = 558
+
+    static constexpr UINT POST_PROCESS_DESC_START = 650;
 
     struct Particle {
         DirectX::XMFLOAT3 position;
@@ -256,6 +262,12 @@ private:
     void UpdateParticles(float deltaTime, float totalTime);
     void RenderParticles();
 
+    void CreatePostProcessResources();
+    void CompilePostProcessShaders();
+    void CreatePostProcessRootSignature();
+    void CreatePostProcessPSOs();
+    void ApplyPostProcessing();
+
     ComPtr<ID3D12Resource> m_shadowMaps[MAX_CASCADES];
     ComPtr<ID3D12Resource> m_shadowCB;
     ShadowCBData* m_shadowCBData = nullptr;
@@ -280,7 +292,7 @@ private:
     };
     ShadowMapCBData* m_shadowMapCBData = nullptr;
     // end
-    
+
     ComPtr<ID3D12Device> m_device;
     ComPtr<IDXGIFactory6> m_factory;
     ComPtr<ID3D12CommandQueue> m_cmdQueue;
@@ -342,9 +354,11 @@ private:
     LightBufferData* m_lightMappedData = nullptr;
     ComPtr<ID3D12Resource> m_pointLightBuffer;
     PointLight* m_pointLightsMapped = nullptr;
-    struct RainLight { PointLight data; bool active = false; 
-    XMFLOAT3 velocity{ 0.f, -200.f, 0.f }; 
-    float lifeTime = 0.f; };
+    struct RainLight {
+        PointLight data; bool active = false;
+        XMFLOAT3 velocity{ 0.f, -200.f, 0.f };
+        float lifeTime = 0.f;
+    };
     std::vector<RainLight> m_rainLights;
     float m_spawnTimer = 0.f;
     float m_spawnInterval = 0.005f;
@@ -387,4 +401,75 @@ private:
     D3D12_INDEX_BUFFER_VIEW m_rockIbView{};
     std::vector<MeshSubset> m_rockSubsets;
     std::vector<GpuMaterial> m_rockMaterials;
+
+    // Post-Processing resources
+    ComPtr<ID3D12Resource> m_hdrRenderTarget;
+    ComPtr<ID3D12Resource> m_luminanceTexture;
+    ComPtr<ID3D12Resource> m_tempBlurTexture;
+
+    ComPtr<ID3D12RootSignature> m_postProcessRootSig;
+    ComPtr<ID3D12PipelineState> m_luminancePSO;
+    ComPtr<ID3D12PipelineState> m_toneMapPSO;
+    ComPtr<ID3D12PipelineState> m_blurHorizontalPSO;
+    ComPtr<ID3D12PipelineState> m_blurVerticalPSO;
+
+    ComPtr<ID3DBlob> m_postProcessVSBlob;
+    ComPtr<ID3DBlob> m_luminancePSBlob;
+    ComPtr<ID3DBlob> m_toneMapPSBlob;
+    ComPtr<ID3DBlob> m_blurHPSBlob;
+    ComPtr<ID3DBlob> m_blurVPSBlob;
+
+    ComPtr<ID3D12Resource> m_postProcessCB;
+    struct PostProcessConstants {
+        float gExposure;
+        float gAdaptationSpeed;
+        float gMiddleGray;
+        float gLumWhite;
+        float gDeltaTime;
+
+        float gMotionBlurIntensity;
+        float gMotionBlurSamples;
+    };
+    PostProcessConstants* m_postProcessCBData = nullptr;
+
+    bool m_enableToneMapping = true;
+    bool m_enableBloom = true;
+    float m_exposure = 1.0f;
+    float m_adaptationSpeed = 0.3f;
+
+    int m_postEffectMode = 0; 
+    float m_motionBlurIntensity = 0.5f;
+    float m_motionBlurSamples = 12.0f;
+    float m_bloomIntensity = 0.6f;
+
+    UINT m_hdrRTVIndex = FRAME_COUNT;
+    UINT m_lumRTVIndex = FRAME_COUNT + 1;
+    UINT m_blurRTVIndex = FRAME_COUNT + 2;
+
+    ComPtr<ID3D12Resource> m_bloomTexture;
+    ComPtr<ID3D12PipelineState> m_bloomExtractPSO;
+    ComPtr<ID3D12PipelineState> m_bloomCombinePSO;
+    ComPtr<ID3DBlob> m_bloomExtractBlob;
+    ComPtr<ID3DBlob> m_bloomCombineBlob;
+
+    UINT m_bloomRTVIndex = FRAME_COUNT + 3;
+    UINT m_bloomSRVIndex = POST_PROCESS_DESC_START + 3;
+
+    ComPtr<ID3D12PipelineState> m_motionBlurPSO;
+    ComPtr<ID3D12PipelineState> m_combinedPostEffectsPSO;
+    ComPtr<ID3DBlob> m_motionBlurBlob;
+    ComPtr<ID3DBlob> m_combinedPostEffectsBlob;
+
+    ComPtr<ID3D12Resource> m_motionBlurCB;
+    struct MotionBlurConstants {
+        XMFLOAT4X4 gPrevViewProj;
+        XMFLOAT4X4 gCurrViewProj;
+    };
+    MotionBlurConstants* m_motionBlurCBData = nullptr;
+
+    XMMATRIX m_prevViewProj;  
+
+    bool m_bKeyPressed = false;
+    bool m_mKeyPressed = false;
+    bool m_nKeyPressed = false;
 };
