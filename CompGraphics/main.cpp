@@ -35,7 +35,18 @@ public:
         }
         OutputDebugStringA("=========================\n");
 
-        m_renderingSystem.GenerateRocks(650, 1200.0f);
+        OutputDebugStringA("[CATS] Loading cat pattern texture...\n");
+        if (m_renderingSystem.LoadCatPattern(L"textures/cats/cat_pattern.png")) {
+            OutputDebugStringA("[CATS] Cat pattern loaded successfully!\n");
+        }
+        else {
+            OutputDebugStringA("[CATS] WARNING: Cat pattern failed to load, using default black texture\n");
+        }
+
+        m_renderingSystem.SetShadowTextureTiling(8.0f);
+        m_renderingSystem.SetShadowTextureStrength(0.6f);
+
+        m_renderingSystem.GenerateRocks(100, 1200.0f);
 
         AddTestLights();
 

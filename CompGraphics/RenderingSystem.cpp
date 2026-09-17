@@ -163,7 +163,6 @@ void RenderingSystem::CreateDescriptorHeaps() {
     ThrowIfFailed(m_device->CreateDescriptorHeap(&cbvD, IID_PPV_ARGS(&m_cbvSrvHeap)));
     m_cbvSrvDescSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    m_shadowMapSRVStart = 150 + (MAX_TEXTURES * 3) + 16;
 }
 
 void RenderingSystem::CreateDefaultTextures() {
@@ -207,7 +206,7 @@ void RenderingSystem::CreateDefaultTextures() {
     };
     m_cmdList->ResourceBarrier(3, barriers);
 
-    CD3DX12_CPU_DESCRIPTOR_HANDLE h(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), 4, m_cbvSrvDescSize);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE h(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), 16, m_cbvSrvDescSize);
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -220,7 +219,6 @@ void RenderingSystem::CreateDefaultTextures() {
     h.Offset(1, m_cbvSrvDescSize);
     m_device->CreateShaderResourceView(m_defaultDisplacementTex.Get(), &srvDesc, h);
 
-    m_currentSrvSlot = 7;
 }
 
 void RenderingSystem::CreateRenderTargetViews() {
@@ -327,7 +325,7 @@ void RenderingSystem::CreateRootSignature() {
 
 void RenderingSystem::CreateLightingRootSignature() {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4 + MAX_CASCADES, 0);
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5 + MAX_CASCADES, 0);
 
     CD3DX12_ROOT_PARAMETER params[3] = {};
     params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
@@ -341,9 +339,13 @@ void RenderingSystem::CreateLightingRootSignature() {
         0.0f, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC shadowSampler(1,
-        D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT,
-        D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER,
-        0, 0, D3D12_COMPARISON_FUNC_LESS, D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK,
+        D3D12_FILTER_MIN_MAG_MIP_LINEAR,      
+        D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+        D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+        D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+        0, 0,
+        D3D12_COMPARISON_FUNC_ALWAYS,                
+        D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE,
         0.0f, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2] = { sampler, shadowSampler };
@@ -550,6 +552,31 @@ bool RenderingSystem::LoadObj(const std::string& path) {
         verts[i].TexCoord = mesh.vertices[i].TexCoord;
     }
     m_subsets = mesh.subsets;
+
+    if (!verts.empty()) {
+        XMFLOAT3 minV = verts[0].Position, maxV = verts[0].Position;
+        for (const auto& v : verts) {
+            minV.x = min(minV.x, v.Position.x); minV.y = min(minV.y, v.Position.y); minV.z = min(minV.z, v.Position.z);
+            maxV.x = max(maxV.x, v.Position.x); maxV.y = max(maxV.y, v.Position.y); maxV.z = max(maxV.z, v.Position.z);
+        }
+        m_sceneCenter = XMFLOAT3(
+            (minV.x + maxV.x) * 0.5f,
+            (minV.y + maxV.y) * 0.5f,
+            (minV.z + maxV.z) * 0.5f
+        );
+        m_sceneExtents = XMFLOAT3(
+            (maxV.x - minV.x) * 0.5f,
+            (maxV.y - minV.y) * 0.5f,
+            (maxV.z - minV.z) * 0.5f
+        );
+
+        char dbg[256];
+        sprintf_s(dbg, "[SCENE] center=(%.1f, %.1f, %.1f) extents=(%.1f, %.1f, %.1f)\n",
+            m_sceneCenter.x, m_sceneCenter.y, m_sceneCenter.z,
+            m_sceneExtents.x, m_sceneExtents.y, m_sceneExtents.z);
+        OutputDebugStringA(dbg);
+    }
+
     std::string dir; size_t p = path.find_last_of("/\\");
     if (p != std::string::npos) dir = path.substr(0, p + 1);
 
@@ -571,6 +598,9 @@ bool RenderingSystem::LoadObj(const std::string& path) {
     m_cmdQueue->ExecuteCommandLists(1, cmds);
     WaitForGPU();
     for (auto& mat : m_gpuMaterials) mat.textureUpload.Reset();
+
+    InitStaticCascades();
+
     return true;
 }
 
@@ -744,6 +774,8 @@ bool RenderingSystem::LoadStump(const std::string& path) {
         m.displacementUpload.Reset();
     }
 
+    m_shadowMapsDirty = true;
+
     return true;
 }
 
@@ -831,11 +863,18 @@ void RenderingSystem::UploadRainLightsToGPU() {
 void RenderingSystem::AddLight() {
     if (!m_lightMappedData) return;
     memset(m_lightMappedData, 0, sizeof(LightBufferData));
-    m_lightMappedData->DirLightDir = XMFLOAT4(0.0f, -1.0f, 0.0f, 0.0f);  
-    m_lightMappedData->DirLightColor = XMFLOAT4(1.0f, 1.0f, 0.8f, 0.5f);
-    m_lightMappedData->AmbientColor = XMFLOAT4(0.3f, 0.3f, 0.12f, 0.15f);
+    m_lightMappedData->DirLightDir = XMFLOAT4(m_lightDir.x, m_lightDir.y, m_lightDir.z, 0.0f);
+    m_lightMappedData->DirLightColor = XMFLOAT4(1.2f, 1.2f, 1.0f, 1.5f);
+    m_lightMappedData->AmbientColor = XMFLOAT4(0.5f, 0.5f, 0.55f, 0.9f);
     m_lightMappedData->NumSpotLights = 0;
     m_lightMappedData->EyePos = XMFLOAT4(m_eye.x, m_eye.y, m_eye.z, 1.0f);
+
+    XMVECTOR eyeV = XMLoadFloat3(&m_eye);
+    XMVECTOR tgtV = XMLoadFloat3(&m_target);
+    XMVECTOR fwd = XMVector3Normalize(tgtV - eyeV);
+    XMFLOAT3 fwdF;
+    XMStoreFloat3(&fwdF, fwd);
+    m_lightMappedData->CameraForward = XMFLOAT4(fwdF.x, fwdF.y, fwdF.z, 0.0f);
 }
 
 void RenderingSystem::BeginFrame(const float clearColor[4]) {
@@ -855,7 +894,8 @@ void RenderingSystem::BeginFrame(const float clearColor[4]) {
     m_cmdList->RSSetScissorRects(1, &sc);
 }
 
-void RenderingSystem::DrawScene(float totalTime, float deltaTime) {
+void RenderingSystem::DrawScene(float totalTime, float deltaTime)
+{
     XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
     float aspect = (float)m_width / (float)m_height;
     XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), aspect, 0.1f, 5000.f);
@@ -869,11 +909,15 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime) {
 
     UpdateCulling(viewProj);
 
-
-    UpdateCascades(view, proj, m_lightDir);
-
-    for (int i = 0; i < m_numCascades; ++i) {
-        RenderShadowMap(m_cascades[i].ViewProj, i);
+    if (!m_cascadesInitialized) {
+        InitStaticCascades();
+    }
+    if (m_shadowMapsDirty) {
+        UpdateCascades(view, proj, m_lightDir);
+        for (int i = 0; i < m_numCascades; ++i) {
+            RenderShadowMap(m_cascades[i].ViewProj, i);
+        }
+        m_shadowMapsDirty = false;
     }
 
     if (m_useDeferredRendering) {
@@ -884,16 +928,6 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime) {
         UpdateRainLights(deltaTime);
         RenderLightingPass();
         UpdateParticles(deltaTime, totalTime);
-
-        XMVECTOR lightPos = XMVectorSet(0.0f, 500.0f, 0.0f, 1.0f);
-        XMVECTOR clipPos = XMVector4Transform(lightPos, viewProj);
-
-        float w = XMVectorGetW(clipPos);
-        if (w > 0.001f) {
-            float x = XMVectorGetX(clipPos) / w;
-            float y = XMVectorGetY(clipPos) / w;
-
-        }
 
         if (m_enableToneMapping) {
             ApplyPostProcessing();
@@ -911,7 +945,6 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime) {
         m_particleRenderCBData->gCameraPos = m_eye;
 
         RenderParticles();
-
     }
     else {
         RenderForwardPass(totalTime);
@@ -1004,7 +1037,7 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
         }
         else
         {
-            CD3DX12_GPU_DESCRIPTOR_HANDLE nullH(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 4, m_cbvSrvDescSize);
+            CD3DX12_GPU_DESCRIPTOR_HANDLE nullH(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 16, m_cbvSrvDescSize);
             m_cmdList->SetGraphicsRootDescriptorTable(1, nullH);
         }
         m_cmdList->DrawIndexedInstanced(sub.indexCount, 1, sub.indexStart, 0, 0);
@@ -1107,6 +1140,11 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
 }
 
 void RenderingSystem::RenderLightingPass() {
+    D3D12_VIEWPORT vp = { 0, 0, (float)m_width, (float)m_height, 0, 1 };
+    D3D12_RECT sc = { 0, 0, (LONG)m_width, (LONG)m_height };
+    m_cmdList->RSSetViewports(1, &vp);
+    m_cmdList->RSSetScissorRects(1, &sc);
+
     CD3DX12_RESOURCE_BARRIER hdrToWrite = CD3DX12_RESOURCE_BARRIER::Transition(
         m_hdrRenderTarget.Get(),
         D3D12_RESOURCE_STATE_COMMON,
@@ -1291,13 +1329,13 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
         }
     }
 
-    if (input.IsKeyDown('C')) {  
+    if (input.IsKeyDown('C')) {
         m_exposure = min(m_exposure + 0.05f, 2.0f);
         char msg[128];
         sprintf_s(msg, "Exposure: %.2f\n", m_exposure);
         OutputDebugStringA(msg);
     }
-    if (input.IsKeyDown('Z')) { 
+    if (input.IsKeyDown('Z')) {
         m_exposure = max(m_exposure - 0.05f, 0.05f);
         char msg[128];
         sprintf_s(msg, "Exposure: %.2f\n", m_exposure);
@@ -1377,6 +1415,11 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
     forward = XMVector3TransformNormal(forward, rotationMatrix);
     XMVECTOR targetPos = eyePos + forward;
     XMStoreFloat3(&m_target, targetPos);
+
+    if (m_width > 0 && m_height > 0) {
+        m_mousePosX = (float)input.MouseX() / (float)m_width;
+        m_mousePosY = (float)input.MouseY() / (float)m_height;
+    }
 }
 
 float RenderingSystem::GetVerticalAngle() const {
@@ -2208,10 +2251,11 @@ void RenderingSystem::CreateShadowMapPSO() {
     psoDesc.PS = { nullptr, 0 };
 
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     psoDesc.RasterizerState.DepthBias = 0;
     psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
     psoDesc.RasterizerState.SlopeScaledDepthBias = 0.0f;
-    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
 
     psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 
@@ -2319,7 +2363,9 @@ void RenderingSystem::CreateShadowMapResources() {
             1.0f / (float)SHADOW_MAP_SIZE,
             1.0f / (float)SHADOW_MAP_SIZE);
         m_shadowCBData->ShadowBias = m_shadowBias;
-        m_shadowCBData->PCFRadius = m_pcfRadius;
+        m_shadowCBData->PCFRadius = 3.0f;
+        m_shadowCBData->ShadowTextureTiling = m_shadowTextureTiling;
+        m_shadowCBData->ShadowTextureStrength = m_enableCatShadow ? m_shadowTextureStrength : 0.0f;
     }
 }
 
@@ -2340,7 +2386,7 @@ void RenderingSystem::RenderShadowMap(const XMMATRIX& lightViewProj, int cascade
     m_cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     D3D12_VIEWPORT vp = { 0, 0, (float)SHADOW_MAP_SIZE, (float)SHADOW_MAP_SIZE, 0, 1 };
-    D3D12_RECT sc = { 0, 0, (int)SHADOW_MAP_SIZE, (int)SHADOW_MAP_SIZE };
+    D3D12_RECT sc = { 0, 0, (LONG)SHADOW_MAP_SIZE, (LONG)SHADOW_MAP_SIZE };
 
     m_cmdList->RSSetViewports(1, &vp);
     m_cmdList->RSSetScissorRects(1, &sc);
@@ -2359,82 +2405,172 @@ void RenderingSystem::RenderShadowMap(const XMMATRIX& lightViewProj, int cascade
         D3D12_RESOURCE_STATE_DEPTH_WRITE,
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     m_cmdList->ResourceBarrier(1, &barrier2);
+
+    D3D12_VIEWPORT vpCam = { 0, 0, (float)m_width, (float)m_height, 0, 1 };
+    D3D12_RECT scCam = { 0, 0, (LONG)m_width, (LONG)m_height };
+    m_cmdList->RSSetViewports(1, &vpCam);
+    m_cmdList->RSSetScissorRects(1, &scCam);
 }
 
 void RenderingSystem::RenderGeometryForShadowMap(const XMMATRIX& viewProj) {
-    m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    m_cmdList->IASetVertexBuffers(0, 1, &m_vbView);
-    m_cmdList->IASetIndexBuffer(&m_ibView);
+    if (m_vertexBuffer.Get() && !m_subsets.empty())
+    {
+        m_cmdList->IASetVertexBuffers(0, 1, &m_vbView);
+        m_cmdList->IASetIndexBuffer(&m_ibView);
+        m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    XMMATRIX world = XMMatrixScaling(100.0f, 100.0f, 100.0f) * XMMatrixTranslation(0.0f, 50.0f, 0.0f);
-    XMMATRIX worldViewProj = world * viewProj;
-
-    if (m_shadowMapCBData) {
+        XMMATRIX world = XMMatrixIdentity();
+        XMMATRIX worldViewProj = world * viewProj;
         XMStoreFloat4x4(&m_shadowMapCBData->WorldViewProj, XMMatrixTranspose(worldViewProj));
         m_cmdList->SetGraphicsRootConstantBufferView(0, m_shadowMapCB->GetGPUVirtualAddress());
-    }
 
-    m_cmdList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+        char dbg[128];
+        sprintf_s(dbg, "[SHADOW] Drawing %zu subsets\n", m_subsets.size());
+        OutputDebugStringA(dbg);
+
+        for (const auto& sub : m_subsets) {
+            if (sub.indexCount == 0) continue;
+            m_cmdList->DrawIndexedInstanced(sub.indexCount, 1, sub.indexStart, 0, 0);
+        }
+    }
 }
 
-void RenderingSystem::UpdateCascades(const XMMATRIX& view, const XMMATRIX& proj, const XMFLOAT3& lightDir) {
-    XMVECTOR lightPos = XMVectorSet(0.0f, 800.0f, 0.0f, 1.0f);
-    XMVECTOR targetPos = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
-    XMVECTOR upVec = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+void RenderingSystem::InitStaticCascades()
+{
+    float maxExtent = max(m_sceneExtents.x, max(m_sceneExtents.y, m_sceneExtents.z));
 
-    XMMATRIX lightView = XMMatrixLookAtLH(lightPos, targetPos, upVec);
+    m_cascadeSplits[0] = maxExtent * 0.10f;  
+    m_cascadeSplits[1] = maxExtent * 0.25f;  
+    m_cascadeSplits[2] = maxExtent * 0.55f; 
+    m_cascadeSplits[3] = maxExtent * 1.30f;
 
-    float size = 4000.0f;
-    float nearZ = 0.1f;
-    float farZ = 8000.0f;
+    m_cascadesInitialized = true;
+    m_shadowMapsDirty = true;
 
-    XMMATRIX lightProj = XMMatrixOrthographicLH(size, size, nearZ, farZ);
-    XMMATRIX viewProj = lightView * lightProj;
+    char dbg[256];
+    sprintf_s(dbg, "[CASCADES] splits: %.0f, %.0f, %.0f, %.0f (maxExtent=%.0f)\n",
+        m_cascadeSplits[0], m_cascadeSplits[1], m_cascadeSplits[2], m_cascadeSplits[3], maxExtent);
+    OutputDebugStringA(dbg);
+}
 
-    float maxDist = 2000.0f;
+void RenderingSystem::UpdateCascades(const XMMATRIX& view, const XMMATRIX& proj, const XMFLOAT3& lightDir)
+{
+    XMVECTOR lightDirVec = XMVector3Normalize(XMLoadFloat3(&m_lightDir));
+    XMVECTOR center = XMLoadFloat3(&m_sceneCenter);
+    XMVECTOR extents = XMLoadFloat3(&m_sceneExtents);
+    XMVECTOR upVec = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    if (fabsf(XMVectorGetX(XMVector3Dot(lightDirVec, upVec))) > 0.99f) {
+        upVec = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    }
 
-    for (int i = 0; i < m_numCascades; ++i) {
-        float t = (float)(i + 1) / (float)m_numCascades;
-        float splitDist = maxDist * t * t * 1.5f;
-        m_cascades[i].SplitDistance = splitDist;
-        m_cascadeSplits[i] = splitDist;
-        m_cascades[i].ViewProj = viewProj;
+    float dominantExtent = max(XMVectorGetX(extents), max(XMVectorGetY(extents), XMVectorGetZ(extents)));
+
+    float lightDistance = dominantExtent * 2.5f + 500.0f;
+    XMVECTOR lightPos = center - lightDirVec * lightDistance;
+    XMMATRIX lightView = XMMatrixLookAtLH(lightPos, center, upVec);
+
+    XMVECTOR corners[8];
+    int idx = 0;
+    for (int x = -1; x <= 1; x += 2)
+        for (int y = -1; y <= 1; y += 2)
+            for (int z = -1; z <= 1; z += 2)
+            {
+                XMVECTOR corner = center + XMVectorSet(
+                    x * XMVectorGetX(extents),
+                    y * XMVectorGetY(extents),
+                    z * XMVectorGetZ(extents),
+                    0.0f);
+                corners[idx++] = XMVector4Transform(XMVectorSetW(corner, 1.0f), lightView);
+            }
+
+    XMVECTOR minSceneLS = corners[0];
+    XMVECTOR maxSceneLS = corners[0];
+    for (int i = 1; i < 8; ++i) {
+        minSceneLS = XMVectorMin(minSceneLS, corners[i]);
+        maxSceneLS = XMVectorMax(maxSceneLS, corners[i]);
+    }
+
+    for (int c = 0; c < m_numCascades; ++c)
+    {
+        float p = (float)c / (float)(m_numCascades - 1); 
+        float scale = 1.0f; 
+
+        float centerX = 0.5f * (XMVectorGetX(minSceneLS) + XMVectorGetX(maxSceneLS));
+        float centerY = 0.5f * (XMVectorGetY(minSceneLS) + XMVectorGetY(maxSceneLS));
+
+        float halfWidth = 0.5f * (XMVectorGetX(maxSceneLS) - XMVectorGetX(minSceneLS)) * scale + 28.0f;
+        float halfHeight = 0.5f * (XMVectorGetY(maxSceneLS) - XMVectorGetY(minSceneLS)) * scale + 28.0f;
+
+        float minZ = XMVectorGetZ(minSceneLS) - dominantExtent * 0.45f - 180.0f;
+        float maxZ = XMVectorGetZ(maxSceneLS) + dominantExtent * 0.45f + 180.0f;
+
+        float minX = centerX - halfWidth;
+        float maxX = centerX + halfWidth;
+        float minY = centerY - halfHeight;
+        float maxY = centerY + halfHeight;
+
+        float texelSizeX = (maxX - minX) / (float)SHADOW_MAP_SIZE;
+        float texelSizeY = (maxY - minY) / (float)SHADOW_MAP_SIZE;
+        float texelSize = max(texelSizeX, texelSizeY);
+
+        centerX = floorf(centerX / texelSize) * texelSize;
+        centerY = floorf(centerY / texelSize) * texelSize;
+
+        float halfSize = max(halfWidth, halfHeight);
+        minX = centerX - halfSize;
+        maxX = centerX + halfSize;
+        minY = centerY - halfSize;
+        maxY = centerY + halfSize;
+
+        XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(minX, maxX, minY, maxY, minZ, maxZ);
+
+        m_cascades[c].ViewProj = lightView * lightProj;
+        m_cascades[c].NearPlane = minZ;
+        m_cascades[c].FarPlane = maxZ;
+        m_cascades[c].SplitDistance = halfSize;  
     }
 
     UpdateShadowConstantBuffer();
 }
 
-void RenderingSystem::UpdateShadowConstantBuffer() {
+void RenderingSystem::UpdateShadowConstantBuffer()
+{
     if (!m_shadowCBData) return;
 
     for (int i = 0; i < m_numCascades; ++i) {
-        XMStoreFloat4x4(&m_shadowCBData->LightViewProj[i], XMMatrixTranspose(m_cascades[i].ViewProj));
+        XMStoreFloat4x4(&m_shadowCBData->LightViewProj[i],
+            XMMatrixTranspose(m_cascades[i].ViewProj));
     }
 
-    XMFLOAT4 splits;
-    splits.x = (m_numCascades > 0) ? m_cascadeSplits[0] : 100.0f;
-    splits.y = (m_numCascades > 1) ? m_cascadeSplits[1] : 200.0f;
-    splits.z = (m_numCascades > 2) ? m_cascadeSplits[2] : 400.0f;
-    splits.w = (m_numCascades > 3) ? m_cascadeSplits[3] : 500.0f;
-    m_shadowCBData->CascadeSplits = splits;
+    XMFLOAT4 texelWorldSizes;
+    float* texelArr = &texelWorldSizes.x;
+    for (int i = 0; i < 4; ++i) {
+        int c = min(i, m_numCascades - 1);
+        float halfSize = m_cascades[c].SplitDistance; 
+        texelArr[i] = (2.0f * halfSize) / (float)SHADOW_MAP_SIZE;
+    }
+    m_shadowCBData->CascadeSplits = texelWorldSizes;
 
     XMVECTOR lightDirVec = XMVector3Normalize(XMLoadFloat3(&m_lightDir));
-    XMFLOAT3 lightDir;
-    XMStoreFloat3(&lightDir, lightDirVec);
-    m_shadowCBData->LightDir = XMFLOAT4(lightDir.x, lightDir.y, lightDir.z, 0.0f);
+    XMFLOAT3 lightDirF;
+    XMStoreFloat3(&lightDirF, lightDirVec);
+    m_shadowCBData->LightDir = XMFLOAT4(lightDirF.x, lightDirF.y, lightDirF.z, 0.0f);
 
-    XMVECTOR lightPos = -lightDirVec * 1000.0f;
+    XMVECTOR lightPos = XMLoadFloat3(&m_sceneCenter) - lightDirVec * 5000.0f;
     XMFLOAT3 lightPosF;
     XMStoreFloat3(&lightPosF, lightPos);
     m_shadowCBData->LightPos = XMFLOAT4(lightPosF.x, lightPosF.y, lightPosF.z, 1.0f);
 
     m_shadowCBData->ShadowMapSize = XMFLOAT4(
-        (float)SHADOW_MAP_SIZE,
-        (float)SHADOW_MAP_SIZE,
-        1.0f / (float)SHADOW_MAP_SIZE,
-        1.0f / (float)SHADOW_MAP_SIZE);
+        (float)SHADOW_MAP_SIZE, (float)SHADOW_MAP_SIZE,
+        1.0f / (float)SHADOW_MAP_SIZE, 1.0f / (float)SHADOW_MAP_SIZE);
+
     m_shadowCBData->ShadowBias = m_shadowBias;
-    m_shadowCBData->PCFRadius = m_pcfRadius;
+    m_shadowCBData->PCFRadius = 3.0f;
+    m_shadowCBData->ShadowTextureTiling = m_shadowTextureTiling;
+    m_shadowCBData->ShadowTextureStrength = m_enableCatShadow ? m_shadowTextureStrength : 0.0f;
+
+    m_shadowCBData->EyePos = XMFLOAT4(m_eye.x, m_eye.y, m_eye.z, 1.0f);
 }
 // end of shadows
 
@@ -2671,12 +2807,17 @@ void RenderingSystem::CreatePostProcessPSOs()
 
     if (m_postProcessCBData) {
         m_postProcessCBData->gExposure = m_exposure;
-        m_postProcessCBData->gAdaptationSpeed = 0.3f;
+        m_postProcessCBData->gAdaptationSpeed = 0.0f;
         m_postProcessCBData->gMiddleGray = 0.72f;
         m_postProcessCBData->gLumWhite = 1.5f;
         m_postProcessCBData->gDeltaTime = 0.016f;
-        m_postProcessCBData->gMotionBlurIntensity = 0.5f;
-        m_postProcessCBData->gMotionBlurSamples = 12.0f;
+        m_postProcessCBData->gMotionBlurIntensity = m_motionBlurIntensity;
+        m_postProcessCBData->gMotionBlurSamples = m_motionBlurSamples;
+        m_postProcessCBData->gMousePosX = m_mousePosX;
+        m_postProcessCBData->gMousePosY = m_mousePosY;
+        m_postProcessCBData->gDesatRadius = m_desatRadius;
+        m_postProcessCBData->gDesatStrength = m_desatStrength;
+        m_postProcessCBData->gPad1 = (float)m_width / (float)m_height;
     }
 
     UINT motionBlurCbSize = (sizeof(MotionBlurConstants) + 255) & ~255;
@@ -2758,12 +2899,26 @@ void RenderingSystem::ApplyPostProcessing()
 
     if (m_postProcessCBData) {
         m_postProcessCBData->gExposure = m_exposure;
-        m_postProcessCBData->gAdaptationSpeed = 0.0f;
+        m_postProcessCBData->gAdaptationSpeed = 0.3f;
         m_postProcessCBData->gMiddleGray = 0.72f;
         m_postProcessCBData->gLumWhite = 1.5f;
         m_postProcessCBData->gDeltaTime = 0.016f;
         m_postProcessCBData->gMotionBlurIntensity = m_motionBlurIntensity;
         m_postProcessCBData->gMotionBlurSamples = m_motionBlurSamples;
+        m_postProcessCBData->gMousePosX = m_mousePosX;
+        m_postProcessCBData->gMousePosY = m_mousePosY;
+        m_postProcessCBData->gDesatRadius = m_desatRadius;
+        m_postProcessCBData->gDesatStrength = m_desatStrength;
+    }
+
+    {
+        char dbg[128];
+        sprintf_s(dbg, "[CB-CHECK] mouse=(%.3f,%.3f) r=%.3f s=%.3f\n",
+            m_postProcessCBData->gMousePosX,
+            m_postProcessCBData->gMousePosY,
+            m_postProcessCBData->gDesatRadius,
+            m_postProcessCBData->gDesatStrength);
+        OutputDebugStringA(dbg);
     }
 
     ID3D12DescriptorHeap* heaps[] = { m_cbvSrvHeap.Get() };
@@ -2771,7 +2926,7 @@ void RenderingSystem::ApplyPostProcessing()
 
     CD3DX12_RESOURCE_BARRIER hdrToRead = CD3DX12_RESOURCE_BARRIER::Transition(
         m_hdrRenderTarget.Get(),
-        D3D12_RESOURCE_STATE_COMMON,
+        D3D12_RESOURCE_STATE_RENDER_TARGET,
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     m_cmdList->ResourceBarrier(1, &hdrToRead);
 
@@ -2962,4 +3117,54 @@ void RenderingSystem::ApplyPostProcessing()
     m_cmdList->ResourceBarrier(1, &hdrToCommon);
 
     OutputDebugStringA("[POST-PROCESS] Tone mapping applied\n");
+}
+
+bool RenderingSystem::LoadCatPattern(const std::wstring& path)
+{
+    if (m_initialized) FlushCommandQueue();
+    ThrowIfFailed(m_cmdAllocators[m_frameIndex]->Reset());
+    ThrowIfFailed(m_cmdList->Reset(m_cmdAllocators[m_frameIndex].Get(), nullptr));
+
+    TextureLoader::TextureData td;
+    if (!TextureLoader::LoadFromFile(path, td)) {
+        OutputDebugStringA("[CATS] ERROR: Failed to load cat texture!\n");
+        ThrowIfFailed(m_cmdList->Close());
+        ID3D12CommandList* cmds[] = { m_cmdList.Get() };
+        m_cmdQueue->ExecuteCommandLists(1, cmds);
+        WaitForGPU();
+        return false;
+    }
+
+    if (!TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), td,
+        m_catTexture, m_catTextureUpload)) {
+        OutputDebugStringA("[CATS] ERROR: Failed to create cat GPU texture!\n");
+        ThrowIfFailed(m_cmdList->Close());
+        ID3D12CommandList* cmds[] = { m_cmdList.Get() };
+        m_cmdQueue->ExecuteCommandLists(1, cmds);
+        WaitForGPU();
+        return false;
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = td.format;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(
+        m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+        CAT_TEXTURE_SLOT,
+        m_cbvSrvDescSize);
+
+    m_device->CreateShaderResourceView(m_catTexture.Get(), &srvDesc, srvHandle);
+
+    ThrowIfFailed(m_cmdList->Close());
+    ID3D12CommandList* cmds[] = { m_cmdList.Get() };
+    m_cmdQueue->ExecuteCommandLists(1, cmds);
+    WaitForGPU();
+
+    m_catTextureUpload.Reset();
+
+    OutputDebugStringA("[CATS] Texture loaded and SRV created!\n");
+    return true;
 }

@@ -126,9 +126,10 @@ struct DSOutput
 {
     float4 PosH : SV_POSITION;
     float3 PosW : TEXCOORD0;
-    float3 NormalW : TEXCOORD1;
-    float2 TexCoord : TEXCOORD2;
-    float WaveDebug : TEXCOORD3;
+    float3 PosV : TEXCOORD1; 
+    float3 NormalW : TEXCOORD2;
+    float2 TexCoord : TEXCOORD3;
+    float WaveDebug : TEXCOORD4;
 };
 
 // Domain Shader 
@@ -172,6 +173,7 @@ DSOutput DSMain(
     
     vout.PosW = posW;
     float4 posV = mul(float4(posW, 1.0f), gView);
+    vout.PosV = posV.xyz; 
     vout.PosH = mul(posV, gProj);
     vout.NormalW = normalW;
     vout.TexCoord = texCoord;
@@ -203,7 +205,7 @@ PSOutput PSMain(DSOutput pin)
     
     if (abs(det) < 1e-5f)
     {
-        pout.Normal = float4(N, 1.0f);
+        pout.Normal = float4(N * 0.5f + 0.5f, 1.0f);
     }
     else
     {
@@ -214,7 +216,7 @@ PSOutput PSMain(DSOutput pin)
         float3 normalMapSample = gNormalMap.Sample(gSampler, pin.TexCoord).xyz;
         float3 mappedNormal = normalMapSample * 2.0f - 1.0f;
         N = normalize(mul(mappedNormal, TBN));
-        pout.Normal = float4(N, 1.0f);
+        pout.Normal = float4(N * 0.5f + 0.5f, 1.0f);
     }
     
     //if (pin.WaveDebug > 0.01f)

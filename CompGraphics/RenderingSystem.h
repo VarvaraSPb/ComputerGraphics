@@ -84,6 +84,7 @@ struct alignas(256) LightBufferData {
     XMFLOAT3 Pad0;
     XMFLOAT4 AmbientColor;
     XMFLOAT4 EyePos;
+    XMFLOAT4 CameraForward;  
 };
 
 struct RockInstance {
@@ -100,18 +101,20 @@ struct OctreeNode {
 
 struct alignas(256) ShadowCBData {
     XMFLOAT4X4 LightViewProj[4];
-    XMFLOAT4 CascadeSplits;
+    XMFLOAT4 CascadeSplits;   
     XMFLOAT4 LightDir;
     XMFLOAT4 LightPos;
     XMFLOAT4 ShadowMapSize;
     float ShadowBias;
     float PCFRadius;
-    float Padding[2];
+    float ShadowTextureTiling;   
+    float ShadowTextureStrength;   
+    XMFLOAT4 EyePos;              
 };
 
 struct CascadeData {
     XMMATRIX ViewProj;
-    float SplitDistance;
+    float SplitDistance;  
     float NearPlane;
     float FarPlane;
 };
@@ -145,7 +148,12 @@ public:
     void SetMotionBlurIntensity(float intensity) { m_motionBlurIntensity = intensity; }
     void SetMotionBlurSamples(float samples) { m_motionBlurSamples = samples; }
     void SetBloomIntensity(float intensity) { m_bloomIntensity = intensity; }
-    void SetPostEffectMode(int mode) { m_postEffectMode = mode; } 
+    void SetPostEffectMode(int mode) { m_postEffectMode = mode; }
+
+    //tiling and strength for cat shadow texture
+    bool LoadCatPattern(const std::wstring& path);
+    void SetShadowTextureTiling(float t) { m_shadowTextureTiling = t; }
+    void SetShadowTextureStrength(float s) { m_shadowTextureStrength = s; }
 
 private:
     void CreateDevice();
@@ -194,6 +202,7 @@ private:
     void RenderGeometryForShadowMap(const XMMATRIX& viewProj);
     void UpdateCascades(const XMMATRIX& view, const XMMATRIX& proj, const XMFLOAT3& lightDir);
     void UpdateShadowConstantBuffer();
+    void InitStaticCascades();
     void CreateShadowMapPSO();
     void CompileShadowShaders();
     void CreateShadowMapRootSignature();
@@ -272,13 +281,22 @@ private:
     ComPtr<ID3D12Resource> m_shadowCB;
     ShadowCBData* m_shadowCBData = nullptr;
     CascadeData m_cascades[MAX_CASCADES];
-    float m_cascadeSplits[MAX_CASCADES];
-    int m_numCascades = 3;
-    XMFLOAT3 m_lightDir = { -0.5f, -1.0f, -0.3f };
-    float m_shadowBias = 0.0015f;
-    float m_pcfRadius = 2.0f;
-    UINT m_shadowMapSRVStart = 0;
+    float m_cascadeSplits[MAX_CASCADES] = { 150.0f, 400.0f, 1000.0f, 2500.0f };
+    int m_numCascades = 4;
+    XMFLOAT3 m_lightDir = { 0.0f, -1.0f, 0.0f };
+    float m_shadowBias = 0.0028f;
+    float m_pcfRadius = 1.0f;
+    UINT m_shadowMapSRVStart = 4;
     UINT m_shadowMapDSVStart = 1;
+
+    struct CascadeWorldBounds {
+        XMFLOAT3 Center;
+        XMFLOAT3 Extents;
+        float    SplitDistance;
+    };
+    CascadeWorldBounds m_cascadeBounds[MAX_CASCADES];
+    bool m_cascadesInitialized = false;
+    bool m_shadowMapsDirty = true;
 
     // shadow map PSO
     ComPtr<ID3D12PipelineState> m_shadowMapPSO;
@@ -291,6 +309,16 @@ private:
         XMFLOAT4X4 WorldViewProj;
     };
     ShadowMapCBData* m_shadowMapCBData = nullptr;
+
+	// cat shadow texture
+    ComPtr<ID3D12Resource> m_catTexture;
+    ComPtr<ID3D12Resource> m_catTextureUpload;
+    float m_shadowTextureTiling = 8.0f;
+    float m_shadowTextureStrength = 1.0f;
+    bool  m_enableCatShadow = true;
+    bool  m_cKeyPressed = false;
+    static constexpr UINT CAT_TEXTURE_SLOT = 8; 
+
     // end
 
     ComPtr<ID3D12Device> m_device;
@@ -346,7 +374,7 @@ private:
     ComPtr<ID3D12Resource> m_defaultDiffuseUpload;
     ComPtr<ID3D12Resource> m_defaultNormalUpload;
     ComPtr<ID3D12Resource> m_defaultDisplacementUpload;
-    UINT m_currentSrvSlot = 7;
+    UINT m_currentSrvSlot = 100;  
     ComPtr<ID3D12Resource> m_constantBuffer;
     ConstantBufferData* m_cbMapped = nullptr;
     UINT m_cbSlotSize = 0;
@@ -374,6 +402,8 @@ private:
     XMFLOAT2 m_texScroll = { 0.05f, 0.f };
     int m_width = 0;
     int m_height = 0;
+    XMFLOAT3 m_sceneCenter = { 0.0f, 500.0f, 0.0f };
+    XMFLOAT3 m_sceneExtents = { 2000.0f, 1000.0f, 2000.0f };
     XMFLOAT3 m_eye = { -80.f, 20.f, -20.f };
     XMFLOAT3 m_target = { 0.f, 10.f, 0.f };
     XMFLOAT3 m_up = { 0.f, 1.f, 0.f };
@@ -419,6 +449,12 @@ private:
     ComPtr<ID3DBlob> m_blurHPSBlob;
     ComPtr<ID3DBlob> m_blurVPSBlob;
 
+	// desaturation effect parameters
+    float m_mousePosX = 0.5f;
+    float m_mousePosY = 0.5f;
+    float m_desatRadius = 0.15f;
+    float m_desatStrength = 1.0f;
+
     ComPtr<ID3D12Resource> m_postProcessCB;
     struct PostProcessConstants {
         float gExposure;
@@ -426,9 +462,14 @@ private:
         float gMiddleGray;
         float gLumWhite;
         float gDeltaTime;
-
         float gMotionBlurIntensity;
         float gMotionBlurSamples;
+        float gMousePosX;
+        float gMousePosY;
+        float gDesatRadius;
+        float gDesatStrength;
+        float gPad1;
+        float gPad2;
     };
     PostProcessConstants* m_postProcessCBData = nullptr;
 
@@ -437,7 +478,7 @@ private:
     float m_exposure = 1.0f;
     float m_adaptationSpeed = 0.3f;
 
-    int m_postEffectMode = 0; 
+    int m_postEffectMode = 0;
     float m_motionBlurIntensity = 0.5f;
     float m_motionBlurSamples = 12.0f;
     float m_bloomIntensity = 0.6f;
@@ -467,7 +508,7 @@ private:
     };
     MotionBlurConstants* m_motionBlurCBData = nullptr;
 
-    XMMATRIX m_prevViewProj;  
+    XMMATRIX m_prevViewProj;
 
     bool m_bKeyPressed = false;
     bool m_mKeyPressed = false;
