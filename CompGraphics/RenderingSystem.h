@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <d3d12.h>
@@ -19,6 +19,7 @@
 #include "TextureLoader.h"
 #include "InputDevice.h"
 #include "Gbuffer.h"
+#include "Terrain.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -48,20 +49,23 @@ struct alignas(256) ConstantBufferData {
     float DisplacementScale;
     float TessNearDist;
     float TessFarDist;
+    float EnableWave;
     XMFLOAT2 Pad2;
 };
 
 struct GpuMaterial {
-    ComPtr<ID3D12Resource> texture;
+    ComPtr<ID3D12Resource> texture;         
     ComPtr<ID3D12Resource> textureUpload;
     ComPtr<ID3D12Resource> normalTexture;
     ComPtr<ID3D12Resource> normalUpload;
-    ComPtr<ID3D12Resource> displacementTexture;
-    ComPtr<ID3D12Resource> displacementUpload;
-    int srvHeapIndex = -1;
+    ComPtr<ID3D12Resource> metallicTexture; 
+    ComPtr<ID3D12Resource> metallicUpload;
+    ComPtr<ID3D12Resource> roughnessTexture; 
+    ComPtr<ID3D12Resource> roughnessUpload;
+    int srvHeapIndex = -1;                 
     XMFLOAT4 diffuse = { 0.8f, 0.8f, 0.8f, 1.f };
-    XMFLOAT4 specular = { 0.5f, 0.5f, 0.5f, 1.f };
-    float shininess = 32.f;
+    float metallic = 0.0f;
+    float roughness = 0.5f;
     bool hasTexture = false;
 };
 
@@ -81,10 +85,13 @@ struct alignas(256) LightBufferData {
     XMFLOAT4 DirLightColor;
     SpotLight SpotLights[2];
     int NumSpotLights;
-    XMFLOAT3 Pad0;
+    UINT NumPointLights;         
+    XMFLOAT2 Pad0;               
     XMFLOAT4 AmbientColor;
     XMFLOAT4 EyePos;
-    XMFLOAT4 CameraForward;  
+    XMFLOAT4 CameraForward;
+    float PrefilterMipCount;     
+    float Pad1[3];
 };
 
 struct RockInstance {
@@ -124,11 +131,11 @@ class RenderingSystem
 public:
     static constexpr UINT FRAME_COUNT = 2;
     static constexpr UINT MAX_TEXTURES = 128;
-    static constexpr UINT MAX_SUBSETS = 512;
-    static constexpr UINT MAX_RAIN_LIGHTS = 300;
+    static constexpr UINT MAX_SUBSETS = 1024;
+    static constexpr UINT MAX_RAIN_LIGHTS = 64;
 
     static constexpr UINT MAX_CASCADES = 4;
-    static constexpr UINT SHADOW_MAP_SIZE = 4096;
+    static constexpr UINT SHADOW_MAP_SIZE = 2048;
 
     RenderingSystem() = default;
     ~RenderingSystem();
@@ -140,6 +147,7 @@ public:
     void OnResize(int width, int height);
     bool LoadObj(const std::string& path);
     bool LoadStump(const std::string& path);
+    bool LoadCerberus(const std::string& path);
     void SetTexTiling(float x, float y) { m_texTiling = { x, y }; }
     void SetTexScroll(float x, float y) { m_texScroll = { x, y }; }
     void UpdateCamera(float deltaTime, const InputDevice& input);
@@ -206,6 +214,10 @@ private:
     void CreateShadowMapPSO();
     void CompileShadowShaders();
     void CreateShadowMapRootSignature();
+    void CompileTerrainShaders();
+    void CreateTerrainRootSignature();
+    void CreateTerrainPSO();
+    void RenderTerrainPass(const XMMATRIX& view, const XMMATRIX& proj);
 
     // particles
     static constexpr UINT MAX_PARTICLES = 5000;
@@ -351,6 +363,30 @@ private:
     ComPtr<ID3DBlob> m_lightingPSBlob;
     ComPtr<ID3D12Resource> m_vertexBuffer;
     ComPtr<ID3D12Resource> m_indexBuffer;
+    Terrain m_terrain;
+
+    ComPtr<ID3D12Resource> m_iblIrradiance;       
+    ComPtr<ID3D12Resource> m_iblIrradianceUpload;
+    ComPtr<ID3D12Resource> m_iblPrefilter;        
+    ComPtr<ID3D12Resource> m_iblPrefilterUpload;
+    ComPtr<ID3D12Resource> m_iblBRDFLUT;       
+    ComPtr<ID3D12Resource> m_iblBRDFLUTUpload;
+    bool m_iblLoaded = false;
+
+    static constexpr UINT IBL_IRRADIANCE_SLOT = 9;
+    static constexpr UINT IBL_PREFILTER_SLOT = 10;
+    static constexpr UINT IBL_BRDFLUT_SLOT = 11;
+    static constexpr UINT DEFAULT_BLACK_SLOT = 19;
+    static constexpr UINT DEFAULT_WHITE_SLOT = 20;
+
+    void LoadIBLTextures();
+
+    ComPtr<ID3D12PipelineState> m_terrainPSO;
+    ComPtr<ID3D12RootSignature> m_terrainRootSig;
+    ComPtr<ID3DBlob> m_terrainVSBlob;
+    ComPtr<ID3DBlob> m_terrainPSBlob;
+    static constexpr UINT TERRAIN_SRV_SLOT = 14;
+    static constexpr UINT TERRAIN_SRV_SLOT_DIFFUSE = 13;
     D3D12_VERTEX_BUFFER_VIEW m_vbView{};
     D3D12_INDEX_BUFFER_VIEW m_ibView{};
     std::vector<MeshSubset> m_subsets;
@@ -368,12 +404,23 @@ private:
     D3D12_INDEX_BUFFER_VIEW m_stumpIbView{};
     std::vector<MeshSubset> m_stumpSubsets;
     std::vector<GpuMaterial> m_stumpMaterials;
+    ComPtr<ID3D12Resource> m_cerberusVertexBuffer;
+    ComPtr<ID3D12Resource> m_cerberusIndexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW m_cerberusVbView{};
+    D3D12_INDEX_BUFFER_VIEW m_cerberusIbView{};
+    std::vector<MeshSubset> m_cerberusSubsets;
+    std::vector<GpuMaterial> m_cerberusMaterials;
+
     ComPtr<ID3D12Resource> m_defaultDiffuseTex;
     ComPtr<ID3D12Resource> m_defaultNormalTex;
     ComPtr<ID3D12Resource> m_defaultDisplacementTex;
+    ComPtr<ID3D12Resource> m_defaultBlackTex;   
+    ComPtr<ID3D12Resource> m_defaultWhiteTex;       
     ComPtr<ID3D12Resource> m_defaultDiffuseUpload;
     ComPtr<ID3D12Resource> m_defaultNormalUpload;
     ComPtr<ID3D12Resource> m_defaultDisplacementUpload;
+    ComPtr<ID3D12Resource> m_defaultBlackUpload;
+    ComPtr<ID3D12Resource> m_defaultWhiteUpload;
     UINT m_currentSrvSlot = 100;  
     ComPtr<ID3D12Resource> m_constantBuffer;
     ConstantBufferData* m_cbMapped = nullptr;
@@ -389,7 +436,7 @@ private:
     };
     std::vector<RainLight> m_rainLights;
     float m_spawnTimer = 0.f;
-    float m_spawnInterval = 0.005f;
+    float m_spawnInterval = 0.05f;
     XMFLOAT3 m_spawnAreaMin{ -800.f, 20.f, -350.f };
     XMFLOAT3 m_spawnAreaMax{ 750.f, 30.f, 300.f };
     float m_floorY = -1.5f;

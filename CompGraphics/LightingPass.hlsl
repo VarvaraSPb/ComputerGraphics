@@ -17,15 +17,19 @@ cbuffer LightingCB : register(b0)
     float4 gDirLightColor;
     SpotLight gSpotLights[MAX_SPOT_LIGHTS];
     int gNumSpotLights;
-    float3 gPad0;
+    uint gNumPointLights; 
+    float2 gPad0;
     float4 gAmbientColor;
     float4 gEyePos;
     float4 gCameraForward;
+    float gPrefilterMipCount;
+    float3 gPad1;
 };
 
 #define NUM_CASCADES 4
 #define PCF_RADIUS 1
 #define PCF_SAMPLES ((PCF_RADIUS * 2 + 1) * (PCF_RADIUS * 2 + 1))
+#define PI 3.14159265359
 
 cbuffer ShadowCB : register(b1)
 {
@@ -36,9 +40,9 @@ cbuffer ShadowCB : register(b1)
     float4 gShadowMapSize;
     float gShadowBias;
     float gPCFRadius;
-    float gShadowTextureTiling; 
-    float gShadowTextureStrength; 
-    float4 gShadowEyePos; 
+    float gShadowTextureTiling;
+    float gShadowTextureStrength;
+    float4 gShadowEyePos;
 };
 
 Texture2D gShadowMap0 : register(t4);
@@ -52,6 +56,12 @@ Texture2D gAlbedoMap : register(t0);
 Texture2D gNormalMap : register(t1);
 Texture2D gPositionMap : register(t2);
 StructuredBuffer<PointLight> gPointLights : register(t3);
+Texture2D gMatRMAMap : register(t12);
+
+TextureCube gIrradianceMap : register(t9);
+TextureCube gPrefilterMap : register(t10);
+Texture2D gBRDFLUT : register(t11);
+
 SamplerState gSampler : register(s0);
 
 struct VSInput
@@ -72,6 +82,47 @@ PSInput VSMain(uint vertexID : SV_VertexID)
     output.texCoord = uv;
     output.position = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
     return output;
+}
+
+float DistributionGGX(float3 N, float3 H, float roughness)
+{
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float num = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
+    return num / denom;
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness)
+{
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+    float num = NdotV;
+    float denom = NdotV * (1.0 - k) + k;
+    return num / denom;
+}
+
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+    return ggx1 * ggx2;
+}
+
+float3 fresnelSchlick(float cosTheta, float3 F0)
+{
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
+{
+    return F0 + (max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0)
+           * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 float PCF(Texture2D shadowMap, float2 uv, float compareDepth, float2 texelSize)
@@ -132,8 +183,8 @@ float CalculateShadow(float3 worldPos, float3 normal)
         int radius = (int) gPCFRadius;
         if (radius < 1)
             radius = 1;
-        if (radius > 4)
-            radius = 4;
+        if (radius > 2)
+            radius = 2;
 
         float visibility = 0.0f;
         float samples = 0.0f;
@@ -184,6 +235,7 @@ float4 PSMain(PSInput input) : SV_Target
     float4 albedoData = gAlbedoMap.Sample(gSampler, input.texCoord);
     float4 normalData = gNormalMap.Sample(gSampler, input.texCoord);
     float4 positionData = gPositionMap.Sample(gSampler, input.texCoord);
+    float4 rmaData = gMatRMAMap.Sample(gSampler, input.texCoord);
 
     float3 albedo = albedoData.rgb;
     float3 pos = positionData.rgb;
@@ -199,6 +251,9 @@ float4 PSMain(PSInput input) : SV_Target
         N /= nLen;
 
     float3 V = normalize(gEyePos.xyz - pos);
+    float roughness = clamp(rmaData.x, 0.04, 1.0); 
+    float metallic = saturate(rmaData.y); 
+    float ao = saturate(rmaData.z); 
     
     float shadowFactor = CalculateShadow(pos, N);
     
@@ -227,12 +282,39 @@ float4 PSMain(PSInput input) : SV_Target
         }
     }
     
-    float3 finalColor = albedo * gAmbientColor.xyz * gAmbientColor.w;
-   
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+
     float3 L = normalize(-gLightDir.xyz);
+    float3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
-    finalColor += NdotL * albedo * gDirLightColor.xyz * gDirLightColor.w
-                  * shadowFactor;
+    float3 radiance = gDirLightColor.rgb * gDirLightColor.a;
+    
+    float NDF = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+    float3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+    
+    float3 numerator = NDF * G * F;
+    float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+    float3 specular = numerator / denominator;
+    float3 kS = F;
+    float3 kD = (1.0 - kS) * (1.0 - metallic);
+    
+    float3 finalColor = (kD * albedo / PI + specular) * radiance * NdotL * shadowFactor;
+    
+    float3 F_ibl = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+    float3 kS_ibl = F_ibl;
+    float3 kD_ibl = (1.0 - kS_ibl) * (1.0 - metallic);
+
+    float3 irradiance = gIrradianceMap.Sample(gSampler, N).rgb;
+    float3 diffuseIBL = irradiance * albedo;
+
+    float3 R = reflect(-V, N);
+    float3 prefilteredColor = gPrefilterMap.SampleLevel(gSampler, R, roughness * gPrefilterMipCount).rgb;
+    float2 brdf = gBRDFLUT.Sample(gSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
+    float3 specularIBL = prefilteredColor * (F_ibl * brdf.x + brdf.y);
+
+    float3 ambient = (kD_ibl * diffuseIBL + specularIBL) * ao;
+    finalColor += ambient;
 
     // red
     float3 redLightPos = float3(-200.0, 80.0, -150.0);
@@ -282,7 +364,7 @@ float4 PSMain(PSInput input) : SV_Target
                       * 1.5 * attOrange * shadowFactor;
     }
     
-    for (uint i = 0; i < 300; i++)
+    for (uint i = 0; i < gNumPointLights; i++)
     {
         PointLight light = gPointLights[i];
         if (light.Position.w <= 0.5)

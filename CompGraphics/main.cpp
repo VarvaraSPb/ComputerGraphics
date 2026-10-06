@@ -23,6 +23,18 @@ public:
         m_renderingSystem.SetTexTiling(2.0f, 2.0f);
         m_renderingSystem.SetTexScroll(0.05f, 0.0f);
         m_renderingSystem.LoadObj("sponza.obj");
+        m_renderingSystem.LoadCerberus("textures/ibl/Cerberus.obj");
+
+        TextureLoader::TextureData td;
+        if (TextureLoader::LoadFromFile(L"textures/terrain/heightmap.png", td)) {
+            char msg[128];
+            sprintf_s(msg, "[TERRAIN] Loaded heightmap: %ux%u, format=%d\n",
+                td.width, td.height, td.format);
+            OutputDebugStringA(msg);
+        }
+        else {
+            OutputDebugStringA("[TERRAIN] FAILED to load heightmap!\n");
+        }
 
         OutputDebugStringA("=========================\n");
         OutputDebugStringA("Attempting to load Stump...\n");

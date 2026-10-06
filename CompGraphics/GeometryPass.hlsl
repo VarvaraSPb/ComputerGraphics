@@ -21,12 +21,15 @@ cbuffer GBufferCB : register(b0)
     
     float gTessNearDist;
     float gTessFarDist;
-    float2 gPad2;
+    float gEnableWave; 
+    float gPad2;
 };
 
 Texture2D gDiffuseMap : register(t0);
 Texture2D gNormalMap : register(t1);
 Texture2D gDisplacementMap : register(t2);
+Texture2D gMetallicMap : register(t3);
+Texture2D gRoughnessMap : register(t4);
 SamplerState gSampler : register(s0);
 
 struct VSInput
@@ -126,7 +129,7 @@ struct DSOutput
 {
     float4 PosH : SV_POSITION;
     float3 PosW : TEXCOORD0;
-    float3 PosV : TEXCOORD1; 
+    float3 PosV : TEXCOORD1;
     float3 NormalW : TEXCOORD2;
     float2 TexCoord : TEXCOORD3;
     float WaveDebug : TEXCOORD4;
@@ -154,17 +157,14 @@ DSOutput DSMain(
         posW += (h * gDisplacementScale) * normalW;
     }
     
-    if (gDisplacementScale > 0.0f)
+    if (gEnableWave > 0.5f)   
     {
         float v = texCoord.y;
         float waveCenter = frac(gTotalTime * 0.3f);
         float d = v - waveCenter;
-        
         float envelope = exp(-(d * d) / 0.04f);
-        
         posW += (envelope * 5.0f) * normalW;
-        
-        vout.WaveDebug = 0.0f; //envelope;
+        vout.WaveDebug = envelope;
     }
     else
     {
@@ -173,7 +173,7 @@ DSOutput DSMain(
     
     vout.PosW = posW;
     float4 posV = mul(float4(posW, 1.0f), gView);
-    vout.PosV = posV.xyz; 
+    vout.PosV = posV.xyz;
     vout.PosH = mul(posV, gProj);
     vout.NormalW = normalW;
     vout.TexCoord = texCoord;
@@ -186,6 +186,7 @@ struct PSOutput
     float4 Albedo : SV_Target0;
     float4 Normal : SV_Target1;
     float4 Position : SV_Target2;
+    float4 MatRMA : SV_Target3; 
 };
 
 // Pixel Shader
@@ -231,5 +232,11 @@ PSOutput PSMain(DSOutput pin)
     pout.Albedo = albedo;
     
     pout.Position = float4(pin.PosW, 1.0f);
+    
+    float roughness = clamp(gRoughnessMap.Sample(gSampler, pin.TexCoord).r, 0.04, 1.0);
+    float metallic = saturate(gMetallicMap.Sample(gSampler, pin.TexCoord).r);
+    float ao = albedo.a;
+    pout.MatRMA = float4(roughness, metallic, ao, 1.0f); 
+
     return pout;
 }
