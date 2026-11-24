@@ -8,7 +8,8 @@ using Microsoft::WRL::ComPtr;
 class Gbuffer
 {
 public:
-    static constexpr int COUNT = 3;
+    static constexpr int COUNT = 4;
+    static constexpr int VELOCITY_INDEX = 3;
 
     bool Initialize(ID3D12Device* device, ID3D12DescriptorHeap* sharedSrvHeap, int width, int height);
 
@@ -17,7 +18,11 @@ public:
     void TransitionToRead(ID3D12GraphicsCommandList* cmdList);
     void TransitionToWrite(ID3D12GraphicsCommandList* cmdList);
 
+    ID3D12Resource* GetDepthResource() const { return m_depthStencil.Get(); }
+    ID3D12Resource* GetRenderTarget(int index) const { return m_renderTargets[index].Get(); } 
     ID3D12DescriptorHeap* GetSRVHeap() const { return m_sharedSrvHeap; }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE GetDSVHandle() const { return m_dsvHeap->GetCPUDescriptorHandleForHeapStart(); }
 
     int GetWidth() const { return m_width; }
     int GetHeight() const { return m_height; }

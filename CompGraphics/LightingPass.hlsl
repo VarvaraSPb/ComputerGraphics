@@ -58,6 +58,14 @@ Texture2D gPositionMap : register(t2);
 StructuredBuffer<PointLight> gPointLights : register(t3);
 Texture2D gMatRMAMap : register(t12);
 
+cbuffer RTLightCB : register(b2)
+{
+    float4 gRTLightPosType; 
+    float4 gRTRadianceMode; 
+    float4 gRTParams; 
+};
+Texture2D<float2> gRTVisibility : register(t13);
+
 TextureCube gIrradianceMap : register(t9);
 TextureCube gPrefilterMap : register(t10);
 Texture2D gBRDFLUT : register(t11);
@@ -235,14 +243,13 @@ float4 PSMain(PSInput input) : SV_Target
     float4 albedoData = gAlbedoMap.Sample(gSampler, input.texCoord);
     float4 normalData = gNormalMap.Sample(gSampler, input.texCoord);
     float4 positionData = gPositionMap.Sample(gSampler, input.texCoord);
-    float4 rmaData = gMatRMAMap.Sample(gSampler, input.texCoord);
 
     float3 albedo = albedoData.rgb;
     float3 pos = positionData.rgb;
 
     if (positionData.a < 0.5f)
         return float4(0.05, 0.05, 0.08, 1.0);
-    
+
     float3 N = normalData.rgb * 2.0 - 1.0;
     float nLen = length(N);
     if (nLen < 0.01)
@@ -251,11 +258,21 @@ float4 PSMain(PSInput input) : SV_Target
         N /= nLen;
 
     float3 V = normalize(gEyePos.xyz - pos);
-    float roughness = clamp(rmaData.x, 0.04, 1.0); 
-    float metallic = saturate(rmaData.y); 
-    float ao = saturate(rmaData.z); 
+    float roughness = clamp(normalData.a, 0.04, 1.0); 
+    float metallic = 0.0f;
+    float ao = saturate(albedoData.a); 
     
-    float shadowFactor = CalculateShadow(pos, N);
+    float shadowMode = gRTRadianceMode.w;
+    float shadowFactor;
+    if (shadowMode > 1.5f)  
+        shadowFactor = saturate(gRTVisibility.Load(int3((int2) input.position.xy, 0)).x);
+    else if (shadowMode > 0.5f) 
+        shadowFactor = 1.0f;
+    else 
+        shadowFactor = CalculateShadow(pos, N);
+
+    if (gRTParams.x > 0.5f)  
+        return float4(shadowFactor.xxx, 1.0f);
     
     if (gShadowTextureStrength > 0.001f)
     {
@@ -285,9 +302,17 @@ float4 PSMain(PSInput input) : SV_Target
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
 
     float3 L = normalize(-gLightDir.xyz);
+    float3 radiance = gDirLightColor.rgb * gDirLightColor.a;
+    if (gRTLightPosType.w > 0.5f && shadowMode > 0.5f) 
+    {
+        float3 toL = gRTLightPosType.xyz - pos;
+        float dL = max(length(toL), 0.01f);
+        L = toL / dL;
+        float kd = dL / 300.0f;
+        radiance = gRTRadianceMode.rgb / (1.0f + kd * kd);
+    }
     float3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
-    float3 radiance = gDirLightColor.rgb * gDirLightColor.a;
     
     float NDF = DistributionGGX(N, H, roughness);
     float G = GeometrySmith(N, V, L, roughness);

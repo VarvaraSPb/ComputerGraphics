@@ -4,6 +4,8 @@ cbuffer GBufferCB : register(b0)
     float4x4 gView;
     float4x4 gProj;
     float4x4 gWorldInvTranspose;
+    float4x4 gPrevWorld;
+    float4x4 gPrevViewProj; 
     float4 gMaterialDiffuse;
     float4 gMaterialSpecular;
     
@@ -14,14 +16,14 @@ cbuffer GBufferCB : register(b0)
     
     float gTexScrollX;
     float gTexScrollY;
-    float2 gPad1;
+    float2 gJitter; 
     
     float3 gEyePosW;
     float gDisplacementScale;
     
     float gTessNearDist;
     float gTessFarDist;
-    float gEnableWave; 
+    float gEnableWave;
     float gPad2;
 };
 
@@ -41,9 +43,11 @@ struct VSInput
 
 struct VSOutput
 {
-    float3 PosW : POSITION;
+    float3 PosW : WORLD_POS;
     float3 NormalW : NORMAL;
     float2 TexCoord : TEXCOORD;
+    float4 CurClipPos : CUR_CLIP;
+    float4 PrevClipPos : PREV_CLIP;
 };
 
 struct HS_CONSTANT_DATA_OUTPUT
@@ -57,6 +61,8 @@ struct HS_CONTROL_POINT_OUTPUT
     float3 PosW : POSITION;
     float3 NormalW : NORMAL;
     float2 TexCoord : TEXCOORD;
+    float4 CurClipPos : CUR_CLIP;
+    float4 PrevClipPos : PREV_CLIP;
 };
 
 //Vertex Shader 
@@ -72,6 +78,12 @@ VSOutput VSMain(VSInput vin)
     uv.x = uv.x * gTexTilingX + gTotalTime * gTexScrollX;
     uv.y = uv.y * gTexTilingY + gTotalTime * gTexScrollY;
     vout.TexCoord = uv;
+
+    float4x4 viewProj = mul(gView, gProj);
+    vout.CurClipPos = mul(posW, viewProj);
+
+    float4 prevPosW = mul(float4(vin.Position, 1.0f), gPrevWorld);
+    vout.PrevClipPos = mul(prevPosW, gPrevViewProj);
     
     return vout;
 }
@@ -122,6 +134,8 @@ HS_CONTROL_POINT_OUTPUT HSMain(
     Output.PosW = ip[i].PosW;
     Output.NormalW = ip[i].NormalW;
     Output.TexCoord = ip[i].TexCoord;
+    Output.CurClipPos = ip[i].CurClipPos;
+    Output.PrevClipPos = ip[i].PrevClipPos;
     return Output;
 }
 
@@ -133,6 +147,8 @@ struct DSOutput
     float3 NormalW : TEXCOORD2;
     float2 TexCoord : TEXCOORD3;
     float WaveDebug : TEXCOORD4;
+    float4 CurClipPos : TEXCOORD5;
+    float4 PrevClipPos : TEXCOORD6;
 };
 
 // Domain Shader 
@@ -149,6 +165,10 @@ DSOutput DSMain(
     float2 texCoord = patch[0].TexCoord * domain.x + patch[1].TexCoord * domain.y + patch[2].TexCoord * domain.z;
     normalW = normalize(normalW);
     
+    float4 prevClip = patch[0].PrevClipPos * domain.x + patch[1].PrevClipPos * domain.y + patch[2].PrevClipPos * domain.z;
+
+    float3 undisplacedPosW = posW;
+    
     // SDVIG PO Displacement Map
     if (gDisplacementScale > 0.0f)
     {
@@ -157,7 +177,7 @@ DSOutput DSMain(
         posW += (h * gDisplacementScale) * normalW;
     }
     
-    if (gEnableWave > 0.5f)   
+    if (gEnableWave > 0.5f)
     {
         float v = texCoord.y;
         float waveCenter = frac(gTotalTime * 0.3f);
@@ -174,7 +194,17 @@ DSOutput DSMain(
     vout.PosW = posW;
     float4 posV = mul(float4(posW, 1.0f), gView);
     vout.PosV = posV.xyz;
-    vout.PosH = mul(posV, gProj);
+
+    float4x4 viewProj = mul(gView, gProj);
+    float4 curClip = mul(float4(posW, 1.0f), viewProj); 
+    vout.CurClipPos = curClip;
+    
+    float3 disp = posW - undisplacedPosW;
+    vout.PrevClipPos = prevClip + mul(float4(disp, 0.0f), gPrevViewProj);
+
+    vout.PosH = curClip;
+    vout.PosH.xy += gJitter * vout.PosH.w;
+
     vout.NormalW = normalW;
     vout.TexCoord = texCoord;
 
@@ -183,10 +213,10 @@ DSOutput DSMain(
 
 struct PSOutput
 {
-    float4 Albedo : SV_Target0;
-    float4 Normal : SV_Target1;
+    float4 Albedo : SV_Target0; 
+    float4 Normal : SV_Target1; 
     float4 Position : SV_Target2;
-    float4 MatRMA : SV_Target3; 
+    float2 Velocity : SV_Target3; 
 };
 
 // Pixel Shader
@@ -206,7 +236,7 @@ PSOutput PSMain(DSOutput pin)
     
     if (abs(det) < 1e-5f)
     {
-        pout.Normal = float4(N * 0.5f + 0.5f, 1.0f);
+        pout.Normal = float4(N * 0.5f + 0.5f, 0.0f);
     }
     else
     {
@@ -217,26 +247,31 @@ PSOutput PSMain(DSOutput pin)
         float3 normalMapSample = gNormalMap.Sample(gSampler, pin.TexCoord).xyz;
         float3 mappedNormal = normalMapSample * 2.0f - 1.0f;
         N = normalize(mul(mappedNormal, TBN));
-        pout.Normal = float4(N * 0.5f + 0.5f, 1.0f);
+        pout.Normal = float4(N * 0.5f + 0.5f, 0.0f);
     }
     
     //if (pin.WaveDebug > 0.01f)
     //{
-     //   float intensity = saturate(pin.WaveDebug * 2.0f);
+    //   float intensity = saturate(pin.WaveDebug * 2.0f);
     //    pout.Albedo = lerp(albedo, float4(1.0, 0.0, 0.0, 1.0), intensity);
-   // }
-   // else
-   // {
+    //}
+    //else
+    //{
     //    pout.Albedo = albedo;
-   //}
-    pout.Albedo = albedo;
+    //}
     
+    pout.Albedo = albedo;
     pout.Position = float4(pin.PosW, 1.0f);
     
     float roughness = clamp(gRoughnessMap.Sample(gSampler, pin.TexCoord).r, 0.04, 1.0);
-    float metallic = saturate(gMetallicMap.Sample(gSampler, pin.TexCoord).r);
     float ao = albedo.a;
-    pout.MatRMA = float4(roughness, metallic, ao, 1.0f); 
+    
+    pout.Albedo.a = ao;
+    pout.Normal.a = roughness;
+    
+    float2 curUV = (pin.CurClipPos.xy / pin.CurClipPos.w) * float2(0.5f, -0.5f) + 0.5f;
+    float2 prevUV = (pin.PrevClipPos.xy / pin.PrevClipPos.w) * float2(0.5f, -0.5f) + 0.5f;
+    pout.Velocity = curUV - prevUV;
 
     return pout;
 }

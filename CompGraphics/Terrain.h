@@ -29,6 +29,7 @@ public:
         UINT srvStartSlot,
         const std::wstring& heightMapPath,
         const std::wstring& diffuseMapPath,
+        const std::wstring& normalMapPath,
         float worldSize = 2000.0f,
         float heightScale = 200.0f);
 
@@ -45,6 +46,8 @@ public:
         void* cbMapped,
         const XMMATRIX& view,
         const XMMATRIX& proj,
+        const XMMATRIX& prevViewProj,
+        const XMFLOAT2& jitter,
         UINT cbSlotSize,
         UINT frameIndex,
         float totalTime);
@@ -63,9 +66,16 @@ public:
     };
     Stats GetStats() const { return m_stats; }
 
-    float m_sseThreshold = 8.0f;
-    int   m_maxDepth = 6;
+    float m_sseThreshold = 12.0f;
+    int   m_maxDepth = 5;
     int   m_baseMeshRes = 4;
+
+    void BuildRTMesh(int res, std::vector<XMFLOAT3>& outVerts, std::vector<UINT>& outIndices) const;
+    bool InitPaintMask(ID3D12Device* device, ID3D12DescriptorHeap* srvHeap, UINT srvSlot);
+    bool RaycastTerrain(const XMFLOAT3& origin, const XMFLOAT3& dir, float maxDist, XMFLOAT3& outHit) const;
+    void SetBrush(const XMFLOAT3& pos, float radius, bool visible);
+    void PaintBrush(const XMFLOAT3& pos, float radius);
+    void ClearPaint();
 
 private:
     struct QuadNode
@@ -112,17 +122,21 @@ private:
         ID3D12GraphicsCommandList* cmdList,
         const std::wstring& path);
 
+    bool LoadNormalMap(ID3D12Device* device,
+        ID3D12GraphicsCommandList* cmdList,
+        const std::wstring& path);
+
     float SampleHeightCPU(float u, float v) const;
 
     void GetNodeHeightRange(const QuadNode& node,
         float& outMin, float& outMax) const;
 
-private:
     ComPtr<ID3D12Resource> m_heightMap;
     ComPtr<ID3D12Resource> m_heightMapUpload;
     ComPtr<ID3D12Resource> m_diffuseMap;
     ComPtr<ID3D12Resource> m_diffuseMapUpload;
     ComPtr<ID3D12Resource> m_normalMap;
+    ComPtr<ID3D12Resource> m_normalMapUpload;
 
     std::vector<float> m_heightData;
     UINT m_heightMapWidth = 0;
@@ -151,4 +165,16 @@ private:
     UINT m_srvStartSlot = 0;
 
     bool m_initialized = false;
+
+    float GetHeightWorld(float x, float z, bool& inside) const;
+    void UpdatePaintMask(ID3D12GraphicsCommandList* cmdList, UINT frameIndex);
+
+    static constexpr UINT MASK_SIZE = 1024;
+    static constexpr UINT MASK_UPLOAD_COUNT = 4;
+    ComPtr<ID3D12Resource> m_paintMask;
+    std::array<ComPtr<ID3D12Resource>, MASK_UPLOAD_COUNT> m_maskUpload;
+    std::array<UINT8*, MASK_UPLOAD_COUNT> m_maskUploadPtr{};
+    std::vector<UINT8> m_maskData;
+    bool m_maskDirty = false;
+    XMFLOAT4 m_brush = XMFLOAT4(0, 0, 0, 0);
 };

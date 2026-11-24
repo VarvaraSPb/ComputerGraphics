@@ -1,4 +1,4 @@
-﻿#include "Terrain.h"
+#include "Terrain.h"
 #include "TextureLoader.h"
 #include <algorithm>
 #include <cmath>
@@ -16,6 +16,7 @@ bool Terrain::Init(ID3D12Device* device,
     UINT srvStartSlot,
     const std::wstring& heightMapPath,
     const std::wstring& diffuseMapPath,
+    const std::wstring& normalMapPath,
     float worldSize,
     float heightScale)
 {
@@ -35,6 +36,11 @@ bool Terrain::Init(ID3D12Device* device,
     if (!LoadDiffuseMap(device, cmdList, diffuseMapPath))
     {
         OutputDebugStringA("[TERRAIN] WARNING: diffuse map failed, using procedural color\n");
+    }
+
+    if (!LoadNormalMap(device, cmdList, normalMapPath))
+    {
+        OutputDebugStringA("[TERRAIN] WARNING: normal map failed\n");
     }
 
     CreateMeshPyramid(device);
@@ -63,6 +69,23 @@ bool Terrain::Init(ID3D12Device* device,
     else
     {
         device->CreateShaderResourceView(m_heightMap.Get(), &srvDesc, srvDiffuseSimple);
+    }
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE srvNormal(
+        srvHeap->GetCPUDescriptorHandleForHeapStart(),
+        srvStartSlot + 2, descSize);
+
+    if (m_normalMap.Get())
+    {
+        device->CreateShaderResourceView(m_normalMap.Get(), &srvDesc, srvNormal);
+    }
+    else if (m_diffuseMap.Get())
+    {
+        device->CreateShaderResourceView(m_diffuseMap.Get(), &srvDesc, srvNormal);
+    }
+    else
+    {
+        device->CreateShaderResourceView(m_heightMap.Get(), &srvDesc, srvNormal);
     }
 
     m_root = std::make_unique<QuadNode>();
@@ -353,12 +376,16 @@ void Terrain::Render(ID3D12GraphicsCommandList* cmdList,
     void* cbMapped,
     const XMMATRIX& view,
     const XMMATRIX& proj,
+    const XMMATRIX& prevViewProj,
+    const XMFLOAT2& jitter,
     UINT cbSlotSize,
     UINT frameIndex,
     float totalTime)
 {
     if (!m_initialized || m_visibleTiles.empty())
         return;
+
+    UpdatePaintMask(cmdList, frameIndex);
 
     cmdList->SetPipelineState(pso);
     cmdList->SetGraphicsRootSignature(rootSig);
@@ -372,6 +399,7 @@ void Terrain::Render(ID3D12GraphicsCommandList* cmdList,
 
     XMMATRIX viewT = XMMatrixTranspose(view);
     XMMATRIX projT = XMMatrixTranspose(proj);
+    XMMATRIX prevViewProjT = XMMatrixTranspose(prevViewProj);
 
     struct TerrainCB
     {
@@ -379,6 +407,8 @@ void Terrain::Render(ID3D12GraphicsCommandList* cmdList,
         XMFLOAT4X4 View;
         XMFLOAT4X4 Proj;
         XMFLOAT4X4 WorldInvTranspose;
+        XMFLOAT4X4 PrevWorld;
+        XMFLOAT4X4 PrevViewProj;
         XMFLOAT4   MaterialDiffuse;
         XMFLOAT4   MaterialSpecular;
         int        HasTexture;
@@ -397,7 +427,12 @@ void Terrain::Render(ID3D12GraphicsCommandList* cmdList,
         float      TileCenterZ;
         float      WorldOffsetY;
         float      Pad0;
-    };
+        float      JitterX;
+        float      JitterY;
+        float      Pad1;
+        float      Pad2;
+        XMFLOAT4   Brush;    
+    };                   
 
     for (const QuadNode* tile : m_visibleTiles)
     {
@@ -413,8 +448,9 @@ void Terrain::Render(ID3D12GraphicsCommandList* cmdList,
         XMStoreFloat4x4(&cb.World, world);
         XMStoreFloat4x4(&cb.View, viewT);
         XMStoreFloat4x4(&cb.Proj, projT);
-        XMStoreFloat4x4(&cb.WorldInvTranspose,
-            XMMatrixTranspose(XMMatrixInverse(nullptr, world)));
+        XMStoreFloat4x4(&cb.WorldInvTranspose, XMMatrixTranspose(XMMatrixInverse(nullptr, world)));
+        XMStoreFloat4x4(&cb.PrevWorld, world);
+        XMStoreFloat4x4(&cb.PrevViewProj, prevViewProjT);
 
         cb.MaterialDiffuse = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
         cb.MaterialSpecular = XMFLOAT4(0.0f, 0.8f, 1.0f, 0.0f);
@@ -438,6 +474,10 @@ void Terrain::Render(ID3D12GraphicsCommandList* cmdList,
         cb.TileCenterZ = tile->Center.z;
         cb.WorldOffsetY = m_worldOffset.y;
         cb.Pad0 = 0.0f;
+
+        cb.JitterX = jitter.x;
+        cb.JitterY = jitter.y;
+        cb.Brush = m_brush;
 
         memcpy(dst, &cb, sizeof(TerrainCB));
 
@@ -601,4 +641,227 @@ void Terrain::CreateSingleMesh(ID3D12Device* device,
     outIBView.BufferLocation = outIB->GetGPUVirtualAddress();
     outIBView.SizeInBytes = ibSize;
     outIBView.Format = DXGI_FORMAT_R32_UINT;
+}
+
+bool Terrain::LoadNormalMap(ID3D12Device* device,
+    ID3D12GraphicsCommandList* cmdList,
+    const std::wstring& path)
+{
+    TextureLoader::TextureData td;
+    if (!TextureLoader::LoadFromFile(path, td))
+    {
+        return false;
+    }
+
+    if (!TextureLoader::CreateTexture(device, cmdList, td, m_normalMap, m_normalMapUpload))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool Terrain::InitPaintMask(ID3D12Device* device, ID3D12DescriptorHeap* srvHeap, UINT srvSlot)
+{
+    m_maskData.assign((size_t)MASK_SIZE * MASK_SIZE, 0);
+
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = MASK_SIZE;
+    desc.Height = MASK_SIZE;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    CD3DX12_HEAP_PROPERTIES hp(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&m_paintMask))))
+        return false;
+
+    CD3DX12_HEAP_PROPERTIES upHp(D3D12_HEAP_TYPE_UPLOAD);
+    CD3DX12_RESOURCE_DESC bufDesc = CD3DX12_RESOURCE_DESC::Buffer((UINT64)MASK_SIZE * MASK_SIZE);
+    for (UINT i = 0; i < MASK_UPLOAD_COUNT; ++i)
+    {
+        if (FAILED(device->CreateCommittedResource(&upHp, D3D12_HEAP_FLAG_NONE, &bufDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_maskUpload[i]))))
+            return false;
+        void* p = nullptr;
+        m_maskUpload[i]->Map(0, nullptr, &p);
+        m_maskUploadPtr[i] = reinterpret_cast<UINT8*>(p);
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Format = DXGI_FORMAT_R8_UNORM;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MipLevels = 1;
+
+    UINT descSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE h(srvHeap->GetCPUDescriptorHandleForHeapStart(), srvSlot, descSize);
+    device->CreateShaderResourceView(m_paintMask.Get(), &srv, h);
+
+    m_maskDirty = true;
+    return true;
+}
+
+void Terrain::UpdatePaintMask(ID3D12GraphicsCommandList* cmdList, UINT frameIndex)
+{
+    if (!m_maskDirty || !m_paintMask) return;
+
+    UINT idx = frameIndex % MASK_UPLOAD_COUNT;
+    memcpy(m_maskUploadPtr[idx], m_maskData.data(), m_maskData.size());
+
+    CD3DX12_RESOURCE_BARRIER toCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_paintMask.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_COPY_DEST);
+    cmdList->ResourceBarrier(1, &toCopy);
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+    fp.Offset = 0;
+    fp.Footprint.Format = DXGI_FORMAT_R8_UNORM;
+    fp.Footprint.Width = MASK_SIZE;
+    fp.Footprint.Height = MASK_SIZE;
+    fp.Footprint.Depth = 1;
+    fp.Footprint.RowPitch = MASK_SIZE;
+
+    CD3DX12_TEXTURE_COPY_LOCATION dst(m_paintMask.Get(), 0);
+    CD3DX12_TEXTURE_COPY_LOCATION src(m_maskUpload[idx].Get(), fp);
+    cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    CD3DX12_RESOURCE_BARRIER toRead = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_paintMask.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmdList->ResourceBarrier(1, &toRead);
+
+    m_maskDirty = false;
+}
+
+float Terrain::GetHeightWorld(float x, float z, bool& inside) const
+{
+    float u = (x - m_worldOffset.x) / m_worldSize + 0.5f;
+    float v = (z - m_worldOffset.z) / m_worldSize + 0.5f;
+    inside = (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f);
+    return SampleHeightCPU(u, v) * m_heightScale + m_worldOffset.y;
+}
+
+bool Terrain::RaycastTerrain(const XMFLOAT3& o, const XMFLOAT3& d, float maxDist, XMFLOAT3& outHit) const
+{
+    if (m_heightData.empty()) return false;
+
+    const float step = 4.0f;
+    float tPrev = 0.0f;
+    bool havePrev = false;
+    bool prevAbove = false;
+
+    for (float t = 0.0f; t <= maxDist; t += step)
+    {
+        float x = o.x + d.x * t;
+        float y = o.y + d.y * t;
+        float z = o.z + d.z * t;
+
+        bool inside = false;
+        float h = GetHeightWorld(x, z, inside);
+        bool above = (y > h);
+
+        if (havePrev && inside && prevAbove && !above)
+        {
+            float lo = tPrev, hi = t;
+            for (int i = 0; i < 12; ++i)
+            {
+                float mid = 0.5f * (lo + hi);
+                bool in2 = false;
+                float hm = GetHeightWorld(o.x + d.x * mid, o.z + d.z * mid, in2);
+                if (o.y + d.y * mid > hm) lo = mid; else hi = mid;
+            }
+            outHit = XMFLOAT3(o.x + d.x * hi, o.y + d.y * hi, o.z + d.z * hi);
+            return true;
+        }
+
+        prevAbove = above;
+        havePrev = true;
+        tPrev = t;
+    }
+    return false;
+}
+
+void Terrain::SetBrush(const XMFLOAT3& pos, float radius, bool visible)
+{
+    m_brush = XMFLOAT4(pos.x, pos.z, radius, visible ? 1.0f : 0.0f);
+}
+
+void Terrain::PaintBrush(const XMFLOAT3& pos, float radius)
+{
+    if (m_maskData.empty()) return;
+
+    const float N = (float)MASK_SIZE;
+    float u = (pos.x - m_worldOffset.x) / m_worldSize + 0.5f;
+    float v = (pos.z - m_worldOffset.z) / m_worldSize + 0.5f;
+    float rTex = radius * (N / m_worldSize);
+
+    int x0 = (std::max)(0, (int)floorf(u * N - rTex) - 1);
+    int x1 = (std::min)((int)MASK_SIZE - 1, (int)ceilf(u * N + rTex) + 1);
+    int y0 = (std::max)(0, (int)floorf(v * N - rTex) - 1);
+    int y1 = (std::min)((int)MASK_SIZE - 1, (int)ceilf(v * N + rTex) + 1);
+
+    for (int y = y0; y <= y1; ++y)
+    {
+        float wz = (((float)y + 0.5f) / N - 0.5f) * m_worldSize + m_worldOffset.z;
+        for (int x = x0; x <= x1; ++x)
+        {
+            float wx = (((float)x + 0.5f) / N - 0.5f) * m_worldSize + m_worldOffset.x;
+            float dx = wx - pos.x;
+            float dz = wz - pos.z;
+            float dist = sqrtf(dx * dx + dz * dz);
+            if (dist >= radius) continue;
+
+            float w = (std::min)(1.0f, (std::max)(0.0f, (radius - dist) / (radius * 0.15f)));
+            UINT8 val = (UINT8)(w * 255.0f);
+            UINT8& m = m_maskData[(size_t)y * MASK_SIZE + x];
+            if (val > m) m = val;
+        }
+    }
+    m_maskDirty = true;
+}
+
+void Terrain::ClearPaint()
+{
+    std::fill(m_maskData.begin(), m_maskData.end(), (UINT8)0);
+    m_maskDirty = true;
+}
+
+void Terrain::BuildRTMesh(int res, std::vector<XMFLOAT3>& outVerts, std::vector<UINT>& outIndices) const
+{
+    outVerts.clear();
+    outIndices.clear();
+    if (m_heightData.empty() || res < 2) return;
+
+    outVerts.reserve((size_t)res * res);
+    for (int z = 0; z < res; ++z)
+    {
+        for (int x = 0; x < res; ++x)
+        {
+            float fx = (float)x / (float)(res - 1);
+            float fz = (float)z / (float)(res - 1);
+            float h = SampleHeightCPU(fx, fz) * m_heightScale;
+            outVerts.push_back(XMFLOAT3(
+                m_worldOffset.x + (fx - 0.5f) * m_worldSize,
+                h + m_worldOffset.y,
+                m_worldOffset.z + (fz - 0.5f) * m_worldSize));
+        }
+    }
+
+    outIndices.reserve((size_t)(res - 1) * (res - 1) * 6);
+    for (int z = 0; z < res - 1; ++z)
+    {
+        for (int x = 0; x < res - 1; ++x)
+        {
+            UINT i0 = z * res + x, i1 = i0 + 1, i2 = i0 + res, i3 = i2 + 1;
+            outIndices.push_back(i0); outIndices.push_back(i1); outIndices.push_back(i2);
+            outIndices.push_back(i1); outIndices.push_back(i3); outIndices.push_back(i2);
+        }
+    }
 }

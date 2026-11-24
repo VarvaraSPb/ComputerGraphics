@@ -60,6 +60,7 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height) {
         CreateRootSignature();
         CreateCubeGeometry();
         CreateConstantBuffer();
+        CreateBoxMesh();
 
         if (!m_gbuffer.Initialize(m_device.Get(), m_cbvSrvHeap.Get(), width, height)) {
             OutputDebugStringA("GBuffer initialization failed!\n");
@@ -97,10 +98,16 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height) {
             TERRAIN_SRV_SLOT,
             L"textures/terrain/heightmap.png",
             L"textures/terrain/diffuse.jpg",
+            L"textures/terrain/normal.jpg",
             2000.0f,
             200.0f))
         {
             OutputDebugStringA("[TERRAIN] Init FAILED\n");
+            return false;
+        }
+
+        if (!m_terrain.InitPaintMask(m_device.Get(), m_cbvSrvHeap.Get(), BRUSH_MASK_SLOT)) {
+            OutputDebugStringA("[TERRAIN] Paint mask init FAILED\n");
             return false;
         }
 
@@ -111,16 +118,30 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height) {
         CreatePostProcessRootSignature();
         CreatePostProcessPSOs();
 
+        CompileAtmosphereShaders();
+        CreateAtmospherePipeline();
+
+        CompileTAAShader();
+        CreateTAARootSignature();
+        CreateTAAPSO();
+        CreateTAAResources();
+
+        InitRaytracing();
+
         ThrowIfFailed(m_cmdList->Close());
         ID3D12CommandList* cmds[] = { m_cmdList.Get() };
         m_cmdQueue->ExecuteCommandLists(1, cmds);
         WaitForGPU();
+
+        ThrowIfFailed(m_cmdAllocators[m_frameIndex]->Reset());
+        ThrowIfFailed(m_cmdList->Reset(m_cmdAllocators[m_frameIndex].Get(), nullptr));
     }
     catch (const std::exception& e) {
         OutputDebugStringA(e.what());
         return false;
     }
 
+    NameResources();
     m_initialized = true;
     return true;
 }
@@ -376,9 +397,14 @@ void RenderingSystem::CreateLightingRootSignature() {
     CD3DX12_DESCRIPTOR_RANGE srvRangeMatRMA;
     srvRangeMatRMA.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 12);
 
-    CD3DX12_ROOT_PARAMETER params[3] = {};
+    CD3DX12_DESCRIPTOR_RANGE srvRangeRT;
+    srvRangeRT.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 13);        
+
+    CD3DX12_ROOT_PARAMETER params[5] = {};
     params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
     params[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+    params[3].InitAsConstants(sizeof(RTLightCBData) / 4, 2, 0, D3D12_SHADER_VISIBILITY_PIXEL); 
+    params[4].InitAsDescriptorTable(1, &srvRangeRT, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_DESCRIPTOR_RANGE ranges[] = {
         srvRangeGbuffer,
@@ -407,7 +433,7 @@ void RenderingSystem::CreateLightingRootSignature() {
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2] = { sampler, shadowSampler };
 
-    CD3DX12_ROOT_SIGNATURE_DESC rsDesc(3, params, 2, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    CD3DX12_ROOT_SIGNATURE_DESC rsDesc(5, params, 2, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     ComPtr<ID3DBlob> serialized, errors;
     HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
@@ -479,7 +505,7 @@ void RenderingSystem::CreateGeometryPassPSO() {
     psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     psoDesc.RTVFormats[2] = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    psoDesc.RTVFormats[3] = DXGI_FORMAT_R8G8B8A8_UNORM;   
+    psoDesc.RTVFormats[3] = DXGI_FORMAT_R16G16_FLOAT;
     psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     psoDesc.SampleDesc = { 1, 0 };
 
@@ -548,11 +574,15 @@ void RenderingSystem::CompileTerrainShaders()
 void RenderingSystem::CreateTerrainRootSignature()
 {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0); 
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
 
-    CD3DX12_ROOT_PARAMETER params[2];
+    CD3DX12_DESCRIPTOR_RANGE maskRange;
+    maskRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3); 
+
+    CD3DX12_ROOT_PARAMETER params[3];
     params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
     params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
+    params[2].InitAsDescriptorTable(1, &maskRange, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC sampler(0,
         D3D12_FILTER_MIN_MAG_MIP_LINEAR,
@@ -563,7 +593,7 @@ void RenderingSystem::CreateTerrainRootSignature()
         D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK,
         0.0f, D3D12_SHADER_VISIBILITY_ALL);
 
-    CD3DX12_ROOT_SIGNATURE_DESC rsDesc(2, params, 1, &sampler,
+    CD3DX12_ROOT_SIGNATURE_DESC rsDesc(3, params, 1, &sampler,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     ComPtr<ID3DBlob> serialized, errors;
@@ -604,7 +634,7 @@ void RenderingSystem::CreateTerrainPSO()
     psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     psoDesc.RTVFormats[2] = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    psoDesc.RTVFormats[3] = DXGI_FORMAT_R8G8B8A8_UNORM;    
+    psoDesc.RTVFormats[3] = DXGI_FORMAT_R16G16_FLOAT;
     psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     psoDesc.SampleDesc = { 1, 0 };
 
@@ -622,21 +652,88 @@ void RenderingSystem::RenderTerrainPass(const XMMATRIX& view, const XMMATRIX& pr
 
     m_terrain.Update(view, proj, m_eye, (UINT)m_width, (UINT)m_height);
 
+    m_cmdList->SetGraphicsRootSignature(m_terrainRootSig.Get());
+
     CD3DX12_GPU_DESCRIPTOR_HANDLE srvH(
         m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(),
         TERRAIN_SRV_SLOT,
         m_cbvSrvDescSize);
     m_cmdList->SetGraphicsRootDescriptorTable(1, srvH);
 
+    CD3DX12_GPU_DESCRIPTOR_HANDLE maskH(
+        m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        BRUSH_MASK_SLOT,
+        m_cbvSrvDescSize);
+    m_cmdList->SetGraphicsRootDescriptorTable(2, maskH);
+
     m_terrain.Render(m_cmdList.Get(),
         m_terrainRootSig.Get(),
         m_terrainPSO.Get(),
         m_constantBuffer.Get(),
-        m_cbMapped,        
+        m_cbMapped,
         view, proj,
+        m_prevViewProj,
+        m_currentJitter,
         m_cbSlotSize,
         m_frameIndex,
         m_totalTime);
+}
+
+void RenderingSystem::UpdateBrush(const InputDevice& input)
+{
+    static bool oDown = false, xDown = false;
+
+    if (input.IsKeyDown('O')) {
+        if (!oDown) {
+            oDown = true;
+            m_brushEnabled = !m_brushEnabled;
+            OutputDebugStringA(m_brushEnabled ? "Brush: ON\n" : "Brush: OFF\n");
+        }
+    }
+    else oDown = false;
+
+    if (input.IsKeyDown('X')) {
+        if (!xDown) {
+            xDown = true;
+            m_terrain.ClearPaint();
+            OutputDebugStringA("Brush: paint cleared\n");
+        }
+    }
+    else xDown = false;
+
+    if (input.IsKeyDown(VK_OEM_4)) m_brushRadius = max(5.0f, m_brushRadius - 1.0f);   
+    if (input.IsKeyDown(VK_OEM_6)) m_brushRadius = min(300.0f, m_brushRadius + 1.0f);  
+
+    if (!m_brushEnabled) {
+        m_terrain.SetBrush(XMFLOAT3(0, 0, 0), m_brushRadius, false);
+        return;
+    }
+
+    XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
+    float aspect = (float)m_width / (float)m_height;
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), aspect, 0.1f, 5000.f);
+    XMMATRIX invView = XMMatrixInverse(nullptr, view);
+
+    XMFLOAT4X4 p;
+    XMStoreFloat4x4(&p, proj);
+
+    float ndcX = m_mousePosX * 2.0f - 1.0f;
+    float ndcY = 1.0f - m_mousePosY * 2.0f;
+
+    XMVECTOR dirView = XMVectorSet(ndcX / p._11, ndcY / p._22, 1.0f, 0.0f);
+    XMVECTOR dirWorld = XMVector3Normalize(XMVector3TransformNormal(dirView, invView));
+    XMFLOAT3 dir;
+    XMStoreFloat3(&dir, dirWorld);
+
+    XMFLOAT3 hit;
+    if (m_terrain.RaycastTerrain(m_eye, dir, 8000.0f, hit)) {
+        m_terrain.SetBrush(hit, m_brushRadius, true);
+        if (input.IsKeyDown('G'))
+            m_terrain.PaintBrush(hit, m_brushRadius);
+    }
+    else {
+        m_terrain.SetBrush(XMFLOAT3(0, 0, 0), m_brushRadius, false);
+    }
 }
 
 void RenderingSystem::CreateCubeGeometry() {
@@ -755,6 +852,8 @@ bool RenderingSystem::LoadObj(const std::string& path) {
 
     std::string dir; size_t p = path.find_last_of("/\\");
     if (p != std::string::npos) dir = path.substr(0, p + 1);
+
+    m_cmdList->Close();
 
     ThrowIfFailed(m_cmdAllocators[m_frameIndex]->Reset());
     ThrowIfFailed(m_cmdList->Reset(m_cmdAllocators[m_frameIndex].Get(), nullptr));
@@ -886,6 +985,7 @@ void RenderingSystem::LoadMaterials(const ObjMesh& mesh, const std::string& base
 
 bool RenderingSystem::LoadStump(const std::string& path) {
     if (m_initialized) FlushCommandQueue();
+    m_cmdList->Close();
     ThrowIfFailed(m_cmdAllocators[m_frameIndex]->Reset());
     ThrowIfFailed(m_cmdList->Reset(m_cmdAllocators[m_frameIndex].Get(), nullptr));
 
@@ -1030,6 +1130,7 @@ bool RenderingSystem::LoadStump(const std::string& path) {
 
 bool RenderingSystem::LoadCerberus(const std::string& path) {
     if (m_initialized) FlushCommandQueue();
+    m_cmdList->Close();
     ThrowIfFailed(m_cmdAllocators[m_frameIndex]->Reset());
     ThrowIfFailed(m_cmdList->Reset(m_cmdAllocators[m_frameIndex].Get(), nullptr));
 
@@ -1316,24 +1417,56 @@ void RenderingSystem::BeginFrame(const float clearColor[4]) {
     m_cmdList->RSSetScissorRects(1, &sc);
 }
 
+static float Halton(uint32_t index, uint32_t base)
+{
+    float f = 1.0f;
+    float result = 0.0f;
+    uint32_t i = index;
+    while (i > 0)
+    {
+        f /= static_cast<float>(base);
+        result = result + f * static_cast<float>(i % base);
+        i = static_cast<uint32_t>(floorf(static_cast<float>(i) / static_cast<float>(base)));
+    }
+    return result;
+}
+
 void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 {
     XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
     float aspect = (float)m_width / (float)m_height;
     XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), aspect, 0.1f, 5000.f);
-    XMMATRIX viewProj = view * proj;
+
+    XMMATRIX unjitteredViewProj = view * proj;
 
     if (m_motionBlurCBData) {
         XMStoreFloat4x4(&m_motionBlurCBData->gPrevViewProj, XMMatrixTranspose(m_prevViewProj));
-        XMStoreFloat4x4(&m_motionBlurCBData->gCurrViewProj, XMMatrixTranspose(viewProj));
+        XMStoreFloat4x4(&m_motionBlurCBData->gCurrViewProj, XMMatrixTranspose(unjitteredViewProj));
     }
-    m_prevViewProj = viewProj;
 
-    UpdateCulling(viewProj);
+    UpdateCulling(unjitteredViewProj);
+    UpdateAtmosphere(deltaTime);
 
     if (!m_cascadesInitialized) {
         InitStaticCascades();
     }
+
+    static uint32_t taaFrameIndex = 0;
+    if (m_enableTAA) {
+        taaFrameIndex++;
+        float jitterX = Halton((taaFrameIndex % 16) + 1, 2) - 0.5f;
+        float jitterY = Halton((taaFrameIndex % 16) + 1, 3) - 0.5f;
+        //const float kJitterScale = 0.0f;
+        m_currentJitter.x = (jitterX * 2.0f) / (float)m_width;
+        m_currentJitter.y = (jitterY * 2.0f) / (float)m_height;
+    }
+    else {
+        m_currentJitter = { 0.0f, 0.0f };
+        m_prevJitter = { 0.0f, 0.0f };
+        m_taaHistoryValid = false;
+    }
+    //m_currentJitter = { 0.0f, 0.0f };
+
     if (m_shadowMapsDirty) {
         UpdateCascades(view, proj, m_lightDir);
         for (int i = 0; i < m_numCascades; ++i) {
@@ -1343,14 +1476,20 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
     }
 
     if (m_useDeferredRendering) {
-        UpdateRainLights(deltaTime);  
-        AddLight();               
+        UpdateRainLights(deltaTime);
+        AddLight();
         RenderGeometryPass(totalTime);
         RenderRocks(totalTime);
         RenderTerrainPass(view, proj);
         m_gbuffer.TransitionToRead(m_cmdList.Get());
+        RenderRTShadows();
         RenderLightingPass();
+        RenderAtmospherePass();
         UpdateParticles(deltaTime, totalTime);
+
+        if (m_enableTAA) {
+            ApplyTAA();
+        }
 
         if (m_enableToneMapping) {
             ApplyPostProcessing();
@@ -1372,17 +1511,8 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
     else {
         RenderForwardPass(totalTime);
     }
-}
 
-void RenderingSystem::EndFrame() {
-    CD3DX12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[m_frameIndex].Get(),
-        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-    m_cmdList->ResourceBarrier(1, &b);
-    ThrowIfFailed(m_cmdList->Close());
-    ID3D12CommandList* cmds[] = { m_cmdList.Get() };
-    m_cmdQueue->ExecuteCommandLists(1, cmds);
-    ThrowIfFailed(m_swapChain->Present(1, 0));
-    MoveToNextFrame();
+    m_prevViewProj = unjitteredViewProj;
 }
 
 void RenderingSystem::RenderGeometryPass(float totalTime)
@@ -1436,6 +1566,8 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
         XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
         XMStoreFloat4x4(&cb.Proj, XMMatrixTranspose(proj));
         XMStoreFloat4x4(&cb.WorldInvTranspose, XMMatrixTranspose(wit));
+        XMStoreFloat4x4(&cb.PrevWorld, XMMatrixTranspose(world));
+        XMStoreFloat4x4(&cb.PrevViewProj, XMMatrixTranspose(m_prevViewProj));
         cb.MaterialDiffuse = mat.diffuse;
         cb.MaterialSpecular = XMFLOAT4(mat.metallic, mat.roughness, 0.0f, 0.0f);
         cb.HasTexture = mat.hasTexture ? 1 : 0;
@@ -1443,6 +1575,7 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
         cb.TexTilingY = m_texTiling.y;
         cb.TexScrollX = m_texScroll.x;
         cb.TexScrollY = m_texScroll.y;
+        cb.Jitter = m_currentJitter;
         cb.TotalTime = totalTime;
         cb.EyePosW = m_eye;
         cb.DisplacementScale = 0.0f;
@@ -1479,25 +1612,7 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             XMMatrixRotationZ(XMConvertToRadians(-90.0f)) *
             XMMatrixTranslation(1000.0f, 100.0f, 80.0f);
         XMMATRIX stumpWit = XMMatrixTranspose(XMMatrixInverse(nullptr, stumpWorld));
-
-        XMFLOAT3 stumpPosF(1000.0f, 100.0f, 80.0f);
-        XMVECTOR stumpPos = XMLoadFloat3(&stumpPosF);
-
-        XMVECTOR eyePos = XMLoadFloat3(&m_eye);
-        XMVECTOR distVec = stumpPos - eyePos;
-        float distanceToStump = XMVector3Length(distVec).m128_f32[0];
-
-        float minDist = m_tesselationNearDist;
-        float maxDist = m_tesselationFarDist;
-        float maxTess = 32.0f;
-        float minTess = 2.0f;
-        float expectedTess = minTess;
-
-        if (distanceToStump < maxDist)
-        {
-            float tess = maxTess * max(0.0f, min(1.0f, (maxDist - distanceToStump) / (maxDist - minDist)));
-            expectedTess = max(minTess, tess);
-        }
+        m_rtStumpWorld = stumpWorld;
 
         for (UINT subIdx = 0; subIdx < m_stumpSubsets.size(); ++subIdx)
         {
@@ -1515,6 +1630,8 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
             XMStoreFloat4x4(&cb.Proj, XMMatrixTranspose(proj));
             XMStoreFloat4x4(&cb.WorldInvTranspose, stumpWit);
+            XMStoreFloat4x4(&cb.PrevWorld, XMMatrixTranspose(stumpWorld));
+            XMStoreFloat4x4(&cb.PrevViewProj, XMMatrixTranspose(m_prevViewProj));
             cb.MaterialDiffuse = { 1.0f, 0.0f, 0.0f, 1.0f };
             cb.MaterialSpecular = XMFLOAT4(0.0f, 0.5f, 0.0f, 0.0f);
             cb.HasTexture = 1;
@@ -1522,12 +1639,13 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             cb.TexTilingY = m_texTiling.y;
             cb.TexScrollX = m_texScroll.x;
             cb.TexScrollY = m_texScroll.y;
+            cb.Jitter = m_currentJitter;
             cb.TotalTime = totalTime;
             cb.EyePosW = m_eye;
             cb.DisplacementScale = 15.0f;
             cb.TessNearDist = m_tesselationNearDist;
             cb.TessFarDist = m_tesselationFarDist;
-            cb.EnableWave = 1.0f;  
+            cb.EnableWave = 1.0f;
 
             memcpy(slotPtr, &cb, sizeof(cb));
             m_cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
@@ -1562,10 +1680,16 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
         m_cmdList->IASetVertexBuffers(0, 1, &m_cerberusVbView);
         m_cmdList->IASetIndexBuffer(&m_cerberusIbView);
 
+        if (!m_cerberusPaused)
+            m_cerberusRotationAngle += 0.016f * 3.0f;
+
         XMMATRIX cerbWorld = XMMatrixScaling(100.0f, 100.0f, 100.0f) *
+            XMMatrixRotationY(m_cerberusRotationAngle) *
             XMMatrixTranslation(0.0f, 5.0f, 0.0f);
 
         XMMATRIX cerbWit = XMMatrixTranspose(XMMatrixInverse(nullptr, cerbWorld));
+        m_rtCerbWorld = cerbWorld;
+        XMMATRIX cerbPrevWorld = m_cerberusPrevWorld;
 
         for (UINT subIdx = 0; subIdx < m_cerberusSubsets.size(); ++subIdx)
         {
@@ -1583,6 +1707,8 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
             XMStoreFloat4x4(&cb.Proj, XMMatrixTranspose(proj));
             XMStoreFloat4x4(&cb.WorldInvTranspose, cerbWit);
+            XMStoreFloat4x4(&cb.PrevWorld, XMMatrixTranspose(cerbPrevWorld));
+            XMStoreFloat4x4(&cb.PrevViewProj, XMMatrixTranspose(m_prevViewProj));
             cb.MaterialDiffuse = { 1.0f, 1.0f, 1.0f, 1.0f };
             cb.MaterialSpecular = XMFLOAT4(0.0f, 0.5f, 0.0f, 0.0f);
             cb.HasTexture = 1;
@@ -1590,6 +1716,7 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             cb.TexTilingY = 1.0f;
             cb.TexScrollX = 0.0f;
             cb.TexScrollY = 0.0f;
+            cb.Jitter = m_currentJitter;
             cb.TotalTime = totalTime;
             cb.EyePosW = m_eye;
             cb.DisplacementScale = 0.0f;
@@ -1612,10 +1739,12 @@ void RenderingSystem::RenderGeometryPass(float totalTime)
             m_cmdList->DrawIndexedInstanced(sub.indexCount, 1, sub.indexStart, 0, 0);
         }
 
+        m_cerberusPrevWorld = cerbWorld;
         m_texScroll = savedTexScroll;
         m_cmdList->IASetVertexBuffers(0, 1, &m_vbView);
         m_cmdList->IASetIndexBuffer(&m_ibView);
     }
+    RenderBox(totalTime);
 }
 
 void RenderingSystem::RenderLightingPass() {
@@ -1675,8 +1804,14 @@ void RenderingSystem::RenderLightingPass() {
         m_cmdList->SetGraphicsRootConstantBufferView(1, m_shadowCB->GetGPUVirtualAddress());
     }
     else {
-        OutputDebugStringA("[LIGHTING] WARNING: ShadowCB is NULL!\n");
+        OutputDebugStringA("[LIGHTING] WARNING: ShadowCB is null!\n");
     }
+
+    RTLightCBData rtl;
+    GetRTLightCB(rtl);
+    m_cmdList->SetGraphicsRoot32BitConstants(3, sizeof(RTLightCBData) / 4, &rtl, 0);
+    m_cmdList->SetGraphicsRootDescriptorTable(4, CD3DX12_GPU_DESCRIPTOR_HANDLE(
+        m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), m_rtVisSlot, m_cbvSrvDescSize));
 
     m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_cmdList->IASetVertexBuffers(0, 0, nullptr);
@@ -1743,11 +1878,14 @@ void RenderingSystem::RenderForwardPass(float totalTime) {
 }
 
 void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
+    HandleTAAKeys(input);
+    HandleAtmosphereKeys(deltaTime, input);
+    HandleRTKeys(deltaTime, input);
     if (input.IsKeyDown('T')) {
         if (!m_tKeyPressed) {
-            m_wireframeMode = !m_wireframeMode;
+            m_enableTAA = !m_enableTAA;
             m_tKeyPressed = true;
-            OutputDebugStringA(m_wireframeMode ? "Wireframe: ON\n" : "Wireframe: OFF\n");
+            OutputDebugStringA(m_enableTAA ? "TAA: ON\n" : "TAA: OFF\n");
         }
     }
     else {
@@ -1770,7 +1908,7 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
     }
 
     static float lastPrint = 0;
-    if (input.IsKeyDown('1')) {
+    if (input.IsKeyDown(VK_OEM_COMMA)) {
         m_tesselationNearDist = max(10.0f, m_tesselationNearDist - 10.0f);
         if (m_totalTime - lastPrint > 0.1f) {
             char msg[128];
@@ -1779,7 +1917,7 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
             lastPrint = m_totalTime;
         }
     }
-    if (input.IsKeyDown('2')) {
+    if (input.IsKeyDown(VK_OEM_PERIOD)) {
         m_tesselationNearDist += 10.0f;
         if (m_totalTime - lastPrint > 0.1f) {
             char msg[128];
@@ -1788,7 +1926,7 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
             lastPrint = m_totalTime;
         }
     }
-    if (input.IsKeyDown('3')) {
+    if (input.IsKeyDown(VK_OEM_1)) {
         m_tesselationFarDist = max(100.0f, m_tesselationFarDist - 50.0f);
         if (m_totalTime - lastPrint > 0.1f) {
             char msg[128];
@@ -1797,7 +1935,7 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
             lastPrint = m_totalTime;
         }
     }
-    if (input.IsKeyDown('4')) {
+    if (input.IsKeyDown(VK_OEM_2)) {
         m_tesselationFarDist += 50.0f;
         if (m_totalTime - lastPrint > 0.1f) {
             char msg[128];
@@ -1898,6 +2036,24 @@ void RenderingSystem::UpdateCamera(float deltaTime, const InputDevice& input) {
         m_mousePosX = (float)input.MouseX() / (float)m_width;
         m_mousePosY = (float)input.MouseY() / (float)m_height;
     }
+
+    static XMFLOAT3 s_prevEye = m_eye;
+    static XMFLOAT3 s_prevTarget = m_target;
+    UpdateBrush(input);
+    float dx = m_eye.x - s_prevEye.x;
+    float dy = m_eye.y - s_prevEye.y;
+    float dz = m_eye.z - s_prevEye.z;
+    float eyeJump = sqrtf(dx * dx + dy * dy + dz * dz);
+    float tx = m_target.x - s_prevTarget.x;
+    float ty = m_target.y - s_prevTarget.y;
+    float tz = m_target.z - s_prevTarget.z;
+    float tgtJump = sqrtf(tx * tx + ty * ty + tz * tz);
+    if (eyeJump > 50.0f || tgtJump > 50.0f) {
+        m_taaHistoryValid = false;
+        OutputDebugStringA("[TAA] History reset (camera jump)\n");
+    }
+    s_prevEye = m_eye;
+    s_prevTarget = m_target;
 }
 
 float RenderingSystem::GetVerticalAngle() const {
@@ -1909,12 +2065,38 @@ float RenderingSystem::GetVerticalAngle() const {
 
 void RenderingSystem::OnResize(int width, int height) {
     if (!m_initialized || (m_width == width && m_height == height)) return;
-    m_width = width; m_height = height; FlushCommandQueue();
-    for (auto& rt : m_renderTargets) rt.Reset(); m_depthStencil.Reset();
+    if (width <= 0 || height <= 0) return; 
+
+    m_width = width; m_height = height;
+    FlushCommandQueue();
+
+    for (auto& rt : m_renderTargets) rt.Reset();
+    m_depthStencil.Reset();
+    for (int i = 0; i < 2; ++i) m_taaHistory[i].Reset();
+
+    m_hdrRenderTarget.Reset();
+    m_luminanceTexture.Reset();
+    m_tempBlurTexture.Reset();
+    m_bloomTexture.Reset();
+
     ThrowIfFailed(m_swapChain->ResizeBuffers(FRAME_COUNT, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0));
     m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
-    CreateRenderTargetViews(); CreateDepthStencilView();
+    CreateRenderTargetViews();
+    CreateDepthStencilView();
+
     m_gbuffer.Initialize(m_device.Get(), m_cbvSrvHeap.Get(), width, height);
+
+    CreatePostProcessResources();  
+    if (m_postProcessCBData)
+        m_postProcessCBData->gPad1 = (float)width / (float)height;
+
+    CreateTAAResources();  
+    CreateRTResources();
+    m_initialized = true;
+    m_taaHistoryValid = false;
+    m_taaCurrHistoryIndex = 0;
+    m_prevJitter = { 0.0f, 0.0f };
+    OutputDebugStringA("[TAA] History reset (resize)\n");
 }
 
 void RenderingSystem::WaitForGPU() {
@@ -1941,6 +2123,7 @@ void RenderingSystem::FlushCommandQueue() { WaitForGPU(); }
 
 // rock
 void RenderingSystem::LoadRock(const std::string& path) {
+    m_cmdList->Close();
     ThrowIfFailed(m_cmdAllocators[m_frameIndex]->Reset());
     ThrowIfFailed(m_cmdList->Reset(m_cmdAllocators[m_frameIndex].Get(), nullptr));
 
@@ -2346,12 +2529,17 @@ void RenderingSystem::RenderRocks(float totalTime) {
         XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
         XMStoreFloat4x4(&cb.Proj, XMMatrixTranspose(proj));
         XMStoreFloat4x4(&cb.WorldInvTranspose, worldInvTranspose);
+        XMStoreFloat4x4(&cb.PrevWorld, worldT);
+        XMStoreFloat4x4(&cb.PrevViewProj, XMMatrixTranspose(m_prevViewProj));
 
         cb.MaterialDiffuse = m_rockMaterials[0].diffuse;
         cb.MaterialSpecular = XMFLOAT4(m_rockMaterials[0].metallic, m_rockMaterials[0].roughness, 0.0f, 0.0f);
         cb.HasTexture = m_rockMaterials[0].hasTexture ? 1 : 0;
         cb.TexTilingX = 1.0f;
         cb.TexTilingY = 1.0f;
+        cb.TexScrollX = 0.0f;
+        cb.TexScrollY = 0.0f;
+        cb.Jitter = m_currentJitter;
         cb.TotalTime = totalTime;
         cb.EyePosW = m_eye;
 
@@ -3030,7 +3218,6 @@ void RenderingSystem::UpdateShadowConstantBuffer()
 // end of shadows
 
 // post process
-
 void RenderingSystem::CreatePostProcessResources()
 {
     OutputDebugStringA("[POST-PROCESS] Creating resources...\n");
@@ -3710,4 +3897,598 @@ void RenderingSystem::LoadIBLTextures()
     m_iblBRDFLUTUpload.Reset();
 
     OutputDebugStringA(m_iblLoaded ? "[IBL] All textures loaded OK\n" : "[IBL] Some textures FAILED\n");
+}
+
+void RenderingSystem::CompileTAAShader()
+{
+    OutputDebugStringA("[TAA] Compiling compute shader...\n");
+    UINT flags = 0;
+#ifdef _DEBUG
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    ComPtr<ID3DBlob> errors;
+    HRESULT hr = D3DCompileFromFile(L"TAA.hlsl", nullptr, nullptr, "main", "cs_5_0", flags, 0, &m_taaCSBlob, &errors);
+    if (FAILED(hr)) {
+        if (errors) OutputDebugStringA((char*)errors->GetBufferPointer());
+        ThrowIfFailed(hr);
+    }
+    OutputDebugStringA("[TAA] Compute shader compiled successfully\n");
+}
+
+void RenderingSystem::CreateTAARootSignature()
+{
+    CD3DX12_DESCRIPTOR_RANGE uavRange;
+    uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0); // u0
+
+    CD3DX12_DESCRIPTOR_RANGE srvRange;
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0); // t0, t1, t2
+
+    CD3DX12_ROOT_PARAMETER params[3];
+    params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+    params[1].InitAsDescriptorTable(1, &uavRange, D3D12_SHADER_VISIBILITY_ALL);
+    params[2].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
+
+    CD3DX12_STATIC_SAMPLER_DESC samplers[2] = {};
+    samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    samplers[1].Init(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+
+    CD3DX12_ROOT_SIGNATURE_DESC rsDesc(3, params, 2, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+    ComPtr<ID3DBlob> serialized, errors;
+    ThrowIfFailed(D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
+    ThrowIfFailed(m_device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_taaRootSig)));
+}
+
+void RenderingSystem::CreateTAAPSO() 
+{
+    D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.pRootSignature = m_taaRootSig.Get();
+    psoDesc.CS = { m_taaCSBlob->GetBufferPointer(), m_taaCSBlob->GetBufferSize() };
+    ThrowIfFailed(m_device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&m_taaPSO)));
+}
+
+void RenderingSystem::CreateTAAResources()
+{
+    CD3DX12_HEAP_PROPERTIES hp(D3D12_HEAP_TYPE_DEFAULT);
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = m_width;
+    texDesc.Height = m_height;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    for (int i = 0; i < 2; ++i) {
+        ThrowIfFailed(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &texDesc,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&m_taaHistory[i])));
+    }
+
+    const UINT cbStride = (sizeof(TAAConstants) + 255) & ~255;
+    CD3DX12_HEAP_PROPERTIES uploadHp(D3D12_HEAP_TYPE_UPLOAD);
+    CD3DX12_RESOURCE_DESC cbDesc = CD3DX12_RESOURCE_DESC::Buffer(cbStride * FRAME_COUNT);
+    ThrowIfFailed(m_device->CreateCommittedResource(&uploadHp, D3D12_HEAP_FLAG_NONE, &cbDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_taaCB)));
+    m_taaCB->Map(0, nullptr, reinterpret_cast<void**>(&m_taaCBData));
+    memset(m_taaCBData, 0, cbStride * FRAME_COUNT);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC colorSrvDesc = {};
+    colorSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    colorSrvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    colorSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    colorSrvDesc.Texture2D.MipLevels = 1;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC velSrvDesc = colorSrvDesc;
+    velSrvDesc.Format = DXGI_FORMAT_R16G16_FLOAT;
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+    uavDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+    for (UINT c = 0; c < 2; ++c) {
+        UINT p = 1 - c;
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE uavCpu(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+            TAA_UAV_SLOT + c, m_cbvSrvDescSize);
+        m_device->CreateUnorderedAccessView(m_taaHistory[c].Get(), nullptr, &uavDesc, uavCpu);
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE t0(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+            TAA_SRV_SLOT + c * 3 + 0, m_cbvSrvDescSize);
+        m_device->CreateShaderResourceView(m_hdrRenderTarget.Get(), &colorSrvDesc, t0);
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE t1(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+            TAA_SRV_SLOT + c * 3 + 1, m_cbvSrvDescSize);
+        m_device->CreateShaderResourceView(m_taaHistory[p].Get(), &colorSrvDesc, t1);
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE t2(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+            TAA_SRV_SLOT + c * 3 + 2, m_cbvSrvDescSize);
+        m_device->CreateShaderResourceView(m_gbuffer.GetRenderTarget(Gbuffer::VELOCITY_INDEX), &velSrvDesc, t2);
+    }
+
+    m_taaHistoryValid = false;
+    m_taaCurrHistoryIndex = 0;
+}
+
+void RenderingSystem::ApplyTAA()
+{
+    BeginEvent(L"TAA Resolve");
+
+    m_cmdList->SetPipelineState(m_taaPSO.Get());
+    m_cmdList->SetComputeRootSignature(m_taaRootSig.Get());
+
+    ID3D12DescriptorHeap* heaps[] = { m_cbvSrvHeap.Get() };
+    m_cmdList->SetDescriptorHeaps(1, heaps);
+
+    const UINT cbStride = (sizeof(TAAConstants) + 255) & ~255;
+    TAAConstants* cbData = reinterpret_cast<TAAConstants*>(
+        reinterpret_cast<UINT8*>(m_taaCBData) + m_frameIndex * cbStride);
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = m_taaCB->GetGPUVirtualAddress() + m_frameIndex * cbStride;
+
+    {
+        XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
+        float aspect = (float)m_width / (float)m_height;
+        XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), aspect, 0.1f, 5000.f);
+        XMMATRIX unjitteredVP = view * proj;
+
+        XMMATRIX invVP = XMMatrixInverse(nullptr, unjitteredVP);
+        XMStoreFloat4x4(&cbData->gInvViewProj, XMMatrixTranspose(invVP));
+        XMStoreFloat4x4(&cbData->gPrevViewProj, XMMatrixTranspose(m_prevViewProj));
+        cbData->gResolution = XMFLOAT2((float)m_width, (float)m_height);
+        cbData->gDebugMode = m_taaDebugVelocity ? 1.0f : 0.0f;
+        cbData->gHistoryValid = m_taaHistoryValid ? 1.0f : 0.0f;
+        cbData->gCurrentJitter = m_currentJitter;
+        cbData->gPrevJitter = m_prevJitter;
+        cbData->gPad = XMFLOAT2(m_taaHistoryHandling ? 1.0f : 0.0f, 0.0f);
+    }
+    m_cmdList->SetComputeRootConstantBufferView(0, cbAddr);
+
+    const int prevIdx = m_taaCurrHistoryIndex;
+    const int currIdx = 1 - m_taaCurrHistoryIndex;
+
+    CD3DX12_RESOURCE_BARRIER barriers[3] = {
+        CD3DX12_RESOURCE_BARRIER::Transition(m_hdrRenderTarget.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        CD3DX12_RESOURCE_BARRIER::Transition(m_taaHistory[currIdx].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+        CD3DX12_RESOURCE_BARRIER::Transition(m_gbuffer.GetRenderTarget(Gbuffer::VELOCITY_INDEX), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+    };
+    m_cmdList->ResourceBarrier(3, barriers);
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE uavGpu(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        TAA_UAV_SLOT + currIdx, m_cbvSrvDescSize);
+    m_cmdList->SetComputeRootDescriptorTable(1, uavGpu);
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE srvGpu(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        TAA_SRV_SLOT + currIdx * 3, m_cbvSrvDescSize);
+    m_cmdList->SetComputeRootDescriptorTable(2, srvGpu);
+
+    m_cmdList->Dispatch((UINT)ceil(m_width / 8.0f), (UINT)ceil(m_height / 8.0f), 1);
+
+    CD3DX12_RESOURCE_BARRIER copyBarriers[2] = {
+        CD3DX12_RESOURCE_BARRIER::Transition(m_hdrRenderTarget.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
+        CD3DX12_RESOURCE_BARRIER::Transition(m_taaHistory[currIdx].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)
+    };
+    m_cmdList->ResourceBarrier(2, copyBarriers);
+
+    m_cmdList->SetMarker(1, L"TAA: copy result to HDR", (UINT)(sizeof(L"TAA: copy result to HDR")));
+    m_cmdList->CopyResource(m_hdrRenderTarget.Get(), m_taaHistory[currIdx].Get());
+
+    CD3DX12_RESOURCE_BARRIER restoreBarriers[3] = {
+        CD3DX12_RESOURCE_BARRIER::Transition(m_hdrRenderTarget.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        CD3DX12_RESOURCE_BARRIER::Transition(m_taaHistory[currIdx].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        CD3DX12_RESOURCE_BARRIER::Transition(m_gbuffer.GetRenderTarget(Gbuffer::VELOCITY_INDEX), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    };
+    m_cmdList->ResourceBarrier(3, restoreBarriers);
+
+    m_taaCurrHistoryIndex = currIdx;
+    m_taaHistoryValid = true;
+    m_prevJitter = m_currentJitter;
+
+    EndEvent();
+}
+
+void RenderingSystem::EndFrame() {
+    CD3DX12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[m_frameIndex].Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    m_cmdList->ResourceBarrier(1, &b);
+    ThrowIfFailed(m_cmdList->Close());
+    ID3D12CommandList* cmds[] = { m_cmdList.Get() };
+    m_cmdQueue->ExecuteCommandLists(1, cmds);
+    ThrowIfFailed(m_swapChain->Present(1, 0));
+    MoveToNextFrame();
+}
+
+void RenderingSystem::HandleTAAKeys(const InputDevice& input)
+{
+    if (input.IsKeyDown('Y')) {
+        if (!m_yKeyPressed) {
+            m_yKeyPressed = true;
+            m_taaDebugVelocity = !m_taaDebugVelocity;
+            m_taaHistoryValid = false; 
+            OutputDebugStringA(m_taaDebugVelocity ? "TAA debug: VELOCITY\n" : "TAA debug: OFF\n");
+        }
+    }
+    else m_yKeyPressed = false;
+
+    if (input.IsKeyDown('H')) {
+        if (!m_hKeyPressed) {
+            m_hKeyPressed = true;
+            m_taaHistoryHandling = !m_taaHistoryHandling;
+            OutputDebugStringA(m_taaHistoryHandling ? "TAA history handling: ON\n" : "TAA history handling: OFF\n");
+        }
+    }
+    else m_hKeyPressed = false;
+
+    if (input.IsKeyDown('R')) {
+        if (!m_rKeyPressed) {
+            m_rKeyPressed = true;
+            m_taaHistoryValid = false;
+            OutputDebugStringA("[TAA] History reset (manual)\n");
+        }
+    }
+    else m_rKeyPressed = false;
+
+    if (input.IsKeyDown('P')) {
+        if (!m_pKeyPressed) {
+            m_pKeyPressed = true;
+            m_cerberusPaused = !m_cerberusPaused;
+            OutputDebugStringA(m_cerberusPaused ? "Cerberus: PAUSED\n" : "Cerberus: ROTATING\n");
+        }
+    }
+    else m_pKeyPressed = false;
+
+    static bool vPressed = false;
+    if (input.IsKeyDown('V')) {
+        if (!vPressed) {
+            vPressed = true;
+            XMVECTOR e = XMLoadFloat3(&m_eye);
+            XMVECTOR f = XMVector3Normalize(XMLoadFloat3(&m_target) - e);
+            XMStoreFloat3(&m_boxPos, e + f * 250.0f);
+            m_boxPrevValid = false;
+        }
+    }
+    else vPressed = false;
+}
+
+void RenderingSystem::NameResources()
+{
+    if (m_hdrRenderTarget)  m_hdrRenderTarget->SetName(L"HDR Color (scene)");
+    if (m_taaHistory[0])    m_taaHistory[0]->SetName(L"TAA History 0");
+    if (m_taaHistory[1])    m_taaHistory[1]->SetName(L"TAA History 1");
+    if (m_bloomTexture)     m_bloomTexture->SetName(L"Bloom");
+    if (m_tempBlurTexture)  m_tempBlurTexture->SetName(L"Bloom Blur Temp");
+    for (int i = 0; i < 4; ++i) {
+        static const wchar_t* names[4] = {
+            L"GBuffer Albedo", L"GBuffer Normal", L"GBuffer Position", L"GBuffer Velocity" };
+        if (m_gbuffer.GetRenderTarget(i)) m_gbuffer.GetRenderTarget(i)->SetName(names[i]);
+    }
+}
+
+void RenderingSystem::CreateBoxMesh()
+{
+    std::array<Vertex, 24> verts = { {
+        { { -1,-1, 1 }, { 0, 0, 1 }, { 0,1 } }, { { 1,-1, 1 }, { 0, 0, 1 }, { 1,1 } }, { { 1, 1, 1 }, { 0, 0, 1 }, { 1,0 } }, { { -1, 1, 1 }, { 0, 0, 1 }, { 0,0 } },
+        { { 1,-1,-1 }, { 0, 0,-1 }, { 0,1 } }, { { -1,-1,-1 }, { 0, 0,-1 }, { 1,1 } }, { { -1, 1,-1 }, { 0, 0,-1 }, { 1,0 } }, { { 1, 1,-1 }, { 0, 0,-1 }, { 0,0 } },
+        { { -1,-1,-1 }, {-1, 0, 0 }, { 0,1 } }, { { -1,-1, 1 }, {-1, 0, 0 }, { 1,1 } }, { { -1, 1, 1 }, {-1, 0, 0 }, { 1,0 } }, { { -1, 1,-1 }, {-1, 0, 0 }, { 0,0 } },
+        { { 1,-1, 1 }, { 1, 0, 0 }, { 0,1 } }, { { 1,-1,-1 }, { 1, 0, 0 }, { 1,1 } }, { { 1, 1,-1 }, { 1, 0, 0 }, { 1,0 } }, { { 1, 1, 1 }, { 1, 0, 0 }, { 0,0 } },
+        { { -1, 1, 1 }, { 0, 1, 0 }, { 0,1 } }, { { 1, 1, 1 }, { 0, 1, 0 }, { 1,1 } }, { { 1, 1,-1 }, { 0, 1, 0 }, { 1,0 } }, { { -1, 1,-1 }, { 0, 1, 0 }, { 0,0 } },
+        { { -1,-1,-1 }, { 0,-1, 0 }, { 0,1 } }, { { 1,-1,-1 }, { 0,-1, 0 }, { 1,1 } }, { { 1,-1, 1 }, { 0,-1, 0 }, { 1,0 } }, { { -1,-1, 1 }, { 0,-1, 0 }, { 0,0 } },
+    } };
+    std::array<UINT, 36> idx;
+    for (int f = 0; f < 6; ++f) {
+        UINT b = f * 4;
+        idx[f * 6 + 0] = b + 0; idx[f * 6 + 1] = b + 1; idx[f * 6 + 2] = b + 2;
+        idx[f * 6 + 3] = b + 0; idx[f * 6 + 4] = b + 2; idx[f * 6 + 5] = b + 3;
+    }
+
+    auto upload = [&](const void* data, UINT sz, ComPtr<ID3D12Resource>& buf) {
+        CD3DX12_HEAP_PROPERTIES hp(D3D12_HEAP_TYPE_UPLOAD);
+        CD3DX12_RESOURCE_DESC rd = CD3DX12_RESOURCE_DESC::Buffer(sz);
+        ThrowIfFailed(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buf)));
+        void* p = nullptr;
+        buf->Map(0, nullptr, &p);
+        memcpy(p, data, sz);
+        buf->Unmap(0, nullptr);
+        };
+
+    UINT vbSz = (UINT)(verts.size() * sizeof(Vertex));
+    UINT ibSz = (UINT)(idx.size() * sizeof(UINT));
+    upload(verts.data(), vbSz, m_boxVB);
+    upload(idx.data(), ibSz, m_boxIB);
+    m_boxVbView = { m_boxVB->GetGPUVirtualAddress(), vbSz, sizeof(Vertex) };
+    m_boxIbView = { m_boxIB->GetGPUVirtualAddress(), ibSz, DXGI_FORMAT_R32_UINT };
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    ID3D12Resource* texs[5] = {
+        m_defaultDiffuseTex.Get(), m_defaultNormalTex.Get(), m_defaultDisplacementTex.Get(),
+        m_defaultBlackTex.Get(),   m_defaultWhiteTex.Get()
+    };
+    for (UINT i = 0; i < 5; ++i) {
+        CD3DX12_CPU_DESCRIPTOR_HANDLE h(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+            BOX_SRV_SLOT + i, m_cbvSrvDescSize);
+        m_device->CreateShaderResourceView(texs[i], &srvDesc, h);
+    }
+}
+
+void RenderingSystem::RenderBox(float totalTime)
+{
+    if (!m_boxVB) return;
+
+    if (!m_cerberusPaused)
+        m_boxAngle += 0.016f * 2.0f;
+
+    XMMATRIX world =
+        XMMatrixScaling(8.0f, 8.0f, 120.0f) *
+        XMMatrixRotationY(m_boxAngle) *
+        XMMatrixTranslation(m_boxPos.x, m_boxPos.y, m_boxPos.z);
+    m_rtBoxWorld = world;
+
+    if (!m_boxPrevValid) {    
+        m_boxPrevWorld = world;
+        m_boxPrevValid = true;
+    }
+
+    XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
+    float aspect = (float)m_width / (float)m_height;
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), aspect, 0.1f, 5000.f);
+    XMMATRIX wit = XMMatrixTranspose(XMMatrixInverse(nullptr, world));
+
+    UINT slotIdx = m_frameIndex * MAX_SUBSETS + 400;
+    UINT8* slotPtr = reinterpret_cast<UINT8*>(m_cbMapped) + slotIdx * m_cbSlotSize;
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = m_constantBuffer->GetGPUVirtualAddress() + slotIdx * m_cbSlotSize;
+
+    ConstantBufferData cb{};
+    XMStoreFloat4x4(&cb.World, XMMatrixTranspose(world));
+    XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
+    XMStoreFloat4x4(&cb.Proj, XMMatrixTranspose(proj));
+    XMStoreFloat4x4(&cb.WorldInvTranspose, wit);
+    XMStoreFloat4x4(&cb.PrevWorld, XMMatrixTranspose(m_boxPrevWorld));
+    XMStoreFloat4x4(&cb.PrevViewProj, XMMatrixTranspose(m_prevViewProj));
+    cb.MaterialDiffuse = { 0.95f, 0.35f, 0.1f, 1.0f };   
+    cb.MaterialSpecular = XMFLOAT4(0.0f, 0.5f, 0.0f, 0.0f);
+    cb.HasTexture = 0;                            
+    cb.TexTilingX = 1.0f;
+    cb.TexTilingY = 1.0f;
+    cb.TexScrollX = 0.0f;
+    cb.TexScrollY = 0.0f;
+    cb.Jitter = m_currentJitter;
+    cb.TotalTime = totalTime;
+    cb.EyePosW = m_eye;
+    cb.DisplacementScale = 0.0f;
+    cb.TessNearDist = m_tesselationNearDist;
+    cb.TessFarDist = m_tesselationFarDist;
+    cb.EnableWave = 0.0f;
+    memcpy(slotPtr, &cb, sizeof(cb));
+
+    m_cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE srvH(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        BOX_SRV_SLOT, m_cbvSrvDescSize);
+    m_cmdList->SetGraphicsRootDescriptorTable(1, srvH);
+
+    m_cmdList->IASetVertexBuffers(0, 1, &m_boxVbView);
+    m_cmdList->IASetIndexBuffer(&m_boxIbView);
+    m_cmdList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+
+    m_boxPrevWorld = world;
+
+    m_cmdList->IASetVertexBuffers(0, 1, &m_vbView);
+    m_cmdList->IASetIndexBuffer(&m_ibView);
+}
+
+// Atmosphere
+void RenderingSystem::CompileAtmosphereShaders()
+{
+    UINT flags = 0;
+#ifdef _DEBUG
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    ComPtr<ID3DBlob> errors;
+    HRESULT hr = D3DCompileFromFile(L"Atmosphere.hlsl", nullptr, nullptr, "VSMain", "vs_5_0", flags, 0, &m_atmoVSBlob, &errors);
+    if (FAILED(hr)) { if (errors) OutputDebugStringA((char*)errors->GetBufferPointer()); ThrowIfFailed(hr); }
+
+    hr = D3DCompileFromFile(L"Atmosphere.hlsl", nullptr, nullptr, "PSMain", "ps_5_0", flags, 0, &m_atmoPSBlob, &errors);
+    if (FAILED(hr)) { if (errors) OutputDebugStringA((char*)errors->GetBufferPointer()); ThrowIfFailed(hr); }
+}
+
+void RenderingSystem::CreateAtmospherePipeline()
+{
+    CD3DX12_DESCRIPTOR_RANGE srvRange;
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+    CD3DX12_ROOT_PARAMETER params[2];
+    params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+    params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    CD3DX12_ROOT_SIGNATURE_DESC rsDesc(2, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+    ComPtr<ID3DBlob> serialized, errors;
+    HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
+    if (FAILED(hr)) { if (errors) OutputDebugStringA((char*)errors->GetBufferPointer()); ThrowIfFailed(hr); }
+    ThrowIfFailed(m_device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_atmoRootSig)));
+
+    D3D12_BLEND_DESC blend = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    blend.RenderTarget[0].BlendEnable = TRUE;
+    blend.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+    blend.RenderTarget[0].DestBlend = D3D12_BLEND_SRC1_COLOR;
+    blend.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    blend.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ZERO;
+    blend.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
+    blend.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.pRootSignature = m_atmoRootSig.Get();
+    psoDesc.VS = { m_atmoVSBlob->GetBufferPointer(), m_atmoVSBlob->GetBufferSize() };
+    psoDesc.PS = { m_atmoPSBlob->GetBufferPointer(), m_atmoPSBlob->GetBufferSize() };
+    psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    psoDesc.BlendState = blend;
+    psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    psoDesc.DepthStencilState.DepthEnable = FALSE;
+    psoDesc.SampleMask = UINT_MAX;
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets = 1;
+    psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;   
+    psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    psoDesc.SampleDesc = { 1, 0 };
+    ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_atmoPSO)));
+
+    const UINT cbStride = (sizeof(AtmosphereCBData) + 255) & ~255u;
+    CD3DX12_HEAP_PROPERTIES hp(D3D12_HEAP_TYPE_UPLOAD);
+    CD3DX12_RESOURCE_DESC rd = CD3DX12_RESOURCE_DESC::Buffer(cbStride * FRAME_COUNT);
+    ThrowIfFailed(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_atmoCB)));
+    ThrowIfFailed(m_atmoCB->Map(0, nullptr, reinterpret_cast<void**>(&m_atmoCBMapped)));
+    memset(m_atmoCBMapped, 0, cbStride * FRAME_COUNT);
+}
+
+void RenderingSystem::HandleAtmosphereKeys(float dt, const InputDevice& input)
+{
+    bool changed = false;
+
+    const float angSpeed = 0.6f * dt;
+    if (input.IsKeyDown('J')) { m_sunAzimuth -= angSpeed; changed = true; }
+    if (input.IsKeyDown('L')) { m_sunAzimuth += angSpeed; changed = true; }
+    if (input.IsKeyDown('I')) { m_sunElevation += angSpeed; changed = true; }
+    if (input.IsKeyDown('K')) { m_sunElevation -= angSpeed; changed = true; }
+    m_sunElevation = std::clamp(m_sunElevation, 0.02f, XM_PIDIV2);
+
+    const float k = 1.0f + 1.5f * dt;
+    bool manualStrength = false;
+    if (input.IsKeyDown('5')) { m_rayleighStrength /= k; manualStrength = true; }
+    if (input.IsKeyDown('6')) { m_rayleighStrength *= k; manualStrength = true; }
+    if (input.IsKeyDown('7')) { m_mieStrength /= k; manualStrength = true; }
+    if (input.IsKeyDown('8')) { m_mieStrength *= k; manualStrength = true; }
+    if (manualStrength) {
+        m_rayleighStrength = std::clamp(m_rayleighStrength, 0.01f, 10.0f);
+        m_mieStrength = std::clamp(m_mieStrength, 0.01f, 50.0f);
+        m_atmoBlending = false;             
+        changed = true;
+    }
+
+    static bool zeroPressed = false;
+    if (input.IsKeyDown('0')) {
+        if (!zeroPressed) {
+            zeroPressed = true;
+            m_atmoPreset = 1 - m_atmoPreset;
+            m_atmoTargetRayleigh = 1.0f;
+            m_atmoTargetMie = (m_atmoPreset == 1) ? 10.0f : 1.0f;
+            m_atmoTargetG = (m_atmoPreset == 1) ? 0.65f : 0.76f;
+            m_atmoBlending = true;
+            OutputDebugStringA(m_atmoPreset == 1 ? "[ATMO] Preset: DIRTY\n" : "[ATMO] Preset: CLEAN\n");
+        }
+    }
+    else zeroPressed = false;
+
+    static bool uPressed = false;
+    if (input.IsKeyDown('U')) {
+        if (!uPressed) {
+            uPressed = true;
+            m_atmoOnObjects = !m_atmoOnObjects;
+            OutputDebugStringA(m_atmoOnObjects ? "[ATMO] Objects: ON\n" : "[ATMO] Objects: OFF\n");
+        }
+    }
+    else uPressed = false;
+
+    if (changed) {
+        char msg[160];
+        sprintf_s(msg, "[ATMO] sun az=%.1f el=%.1f deg | Rayleigh x%.2f | Mie x%.2f\n",
+            XMConvertToDegrees(m_sunAzimuth), XMConvertToDegrees(m_sunElevation),
+            m_rayleighStrength, m_mieStrength);
+        OutputDebugStringA(msg);
+    }
+}
+
+void RenderingSystem::UpdateAtmosphere(float deltaTime)
+{
+    if (m_atmoBlending) {
+        const float t = 1.0f - expf(-3.0f * deltaTime);
+        m_rayleighStrength += (m_atmoTargetRayleigh - m_rayleighStrength) * t;
+        m_mieStrength += (m_atmoTargetMie - m_mieStrength) * t;
+        m_mieG += (m_atmoTargetG - m_mieG) * t;
+        if (fabsf(m_rayleighStrength - m_atmoTargetRayleigh) < 0.005f &&
+            fabsf(m_mieStrength - m_atmoTargetMie) < 0.005f &&
+            fabsf(m_mieG - m_atmoTargetG) < 0.0005f) {
+            m_rayleighStrength = m_atmoTargetRayleigh;
+            m_mieStrength = m_atmoTargetMie;
+            m_mieG = m_atmoTargetG;
+            m_atmoBlending = false;
+        }
+    }
+
+    const float ce = cosf(m_sunElevation);
+    XMFLOAT3 newLightDir(-ce * sinf(m_sunAzimuth), -sinf(m_sunElevation), -ce * cosf(m_sunAzimuth));
+    if (!XMVector3NearEqual(XMLoadFloat3(&newLightDir), XMLoadFloat3(&m_lightDir), XMVectorReplicate(1e-4f))) {
+        m_lightDir = newLightDir;
+        m_shadowMapsDirty = true;            
+    }
+}
+
+void RenderingSystem::RenderAtmospherePass()
+{
+    if (!m_atmoPSO) return;
+    BeginEvent(L"Atmosphere");
+
+    XMVECTOR eye = XMLoadFloat3(&m_eye);
+    XMVECTOR fwd = XMVector3Normalize(XMLoadFloat3(&m_target) - eye);
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(XMLoadFloat3(&m_up), fwd));   
+    XMVECTOR up = XMVector3Cross(fwd, right);
+    XMVECTOR toSun = XMVectorNegate(XMVector3Normalize(XMLoadFloat3(&m_lightDir)));
+
+    const float tanHalfY = tanf(XMConvertToRadians(60.f) * 0.5f);     
+    const float aspect = (float)m_width / (float)m_height;
+
+    const XMFLOAT3 kBetaRayleigh = { 5.5e-6f, 13.0e-6f, 31.2e-6f };       
+    const float    kBetaMie = 21e-6f;                                
+
+    AtmosphereCBData cb{};
+    cb.CameraPos = m_eye;
+    cb.MetersPerUnit = m_atmoMetersPerUnit;
+    XMStoreFloat3(&cb.CamRight, right);   cb.TanHalfFovX = tanHalfY * aspect;
+    XMStoreFloat3(&cb.CamUp, up);      cb.TanHalfFovY = tanHalfY;
+    XMStoreFloat3(&cb.CamForward, fwd);     cb.SunIntensity = m_sunIntensity;
+    XMStoreFloat3(&cb.SunDir, toSun);   cb.MieG = m_mieG;
+    cb.BetaRayleigh = XMFLOAT3(kBetaRayleigh.x * m_rayleighStrength,
+        kBetaRayleigh.y * m_rayleighStrength,
+        kBetaRayleigh.z * m_rayleighStrength);
+    cb.ObjectsEnabled = m_atmoOnObjects ? 1.0f : 0.0f;
+    cb.BetaMie = XMFLOAT3(kBetaMie * m_mieStrength, kBetaMie * m_mieStrength, kBetaMie * m_mieStrength);
+    cb.MieExtinctionScale = 1.0f / 0.9f;    
+    cb.RayleighScaleHeight = 8400.0f;        
+    cb.MieScaleHeight = 1250.0f;
+    cb.JitterX = m_currentJitter.x;         
+    cb.JitterY = m_currentJitter.y;
+
+    const UINT cbStride = (sizeof(AtmosphereCBData) + 255) & ~255u;
+    memcpy(m_atmoCBMapped + m_frameIndex * cbStride, &cb, sizeof(cb));
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = m_atmoCB->GetGPUVirtualAddress() + m_frameIndex * cbStride;
+
+    D3D12_VIEWPORT vp = { 0, 0, (float)m_width, (float)m_height, 0, 1 };
+    D3D12_RECT sc = { 0, 0, (LONG)m_width, (LONG)m_height };
+    m_cmdList->RSSetViewports(1, &vp);
+    m_cmdList->RSSetScissorRects(1, &sc);
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE hdrRTV(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(), m_hdrRTVIndex, m_rtvDescSize);
+    m_cmdList->OMSetRenderTargets(1, &hdrRTV, FALSE, nullptr);
+
+    m_cmdList->SetPipelineState(m_atmoPSO.Get());
+    m_cmdList->SetGraphicsRootSignature(m_atmoRootSig.Get());
+    ID3D12DescriptorHeap* heaps[] = { m_cbvSrvHeap.Get() };
+    m_cmdList->SetDescriptorHeaps(1, heaps);
+    m_cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE posSrv(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        ATMO_GBUFFER_POSITION_SLOT, m_cbvSrvDescSize);
+    m_cmdList->SetGraphicsRootDescriptorTable(1, posSrv);
+
+    m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_cmdList->IASetVertexBuffers(0, 0, nullptr);
+    m_cmdList->IASetIndexBuffer(nullptr);
+    m_cmdList->DrawInstanced(3, 1, 0, 0);
+
+    EndEvent();
 }

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <d3d12.h>
@@ -36,6 +36,8 @@ struct alignas(256) ConstantBufferData {
     XMFLOAT4X4 View;
     XMFLOAT4X4 Proj;
     XMFLOAT4X4 WorldInvTranspose;
+    XMFLOAT4X4 PrevWorld;    
+    XMFLOAT4X4 PrevViewProj; 
     XMFLOAT4 MaterialDiffuse;
     XMFLOAT4 MaterialSpecular;
     int HasTexture;
@@ -44,7 +46,7 @@ struct alignas(256) ConstantBufferData {
     float TotalTime;
     float TexScrollX;
     float TexScrollY;
-    XMFLOAT2 Pad1;
+    XMFLOAT2 Jitter; 
     XMFLOAT3 EyePosW;
     float DisplacementScale;
     float TessNearDist;
@@ -158,10 +160,16 @@ public:
     void SetBloomIntensity(float intensity) { m_bloomIntensity = intensity; }
     void SetPostEffectMode(int mode) { m_postEffectMode = mode; }
 
-    //tiling and strength for cat shadow texture
     bool LoadCatPattern(const std::wstring& path);
     void SetShadowTextureTiling(float t) { m_shadowTextureTiling = t; }
     void SetShadowTextureStrength(float s) { m_shadowTextureStrength = s; }
+
+    void BeginEvent(const wchar_t* name)
+    {
+        m_cmdList->BeginEvent(1, name, (UINT)((wcslen(name) + 1) * sizeof(wchar_t)));
+    }
+    void EndEvent() { m_cmdList->EndEvent(); }
+    void NameResources();
 
 private:
     void CreateDevice();
@@ -224,6 +232,8 @@ private:
     static constexpr UINT PARTICLE_CB_OFFSET = 150 + (MAX_TEXTURES * 3) + (MAX_CASCADES * 2) + 16; // = 534 + 8 + 16 = 558
 
     static constexpr UINT POST_PROCESS_DESC_START = 650;
+    static constexpr UINT TAA_UAV_SLOT = POST_PROCESS_DESC_START + 16; 
+    static constexpr UINT TAA_SRV_SLOT = POST_PROCESS_DESC_START + 20; 
 
     struct Particle {
         DirectX::XMFLOAT3 position;
@@ -461,6 +471,8 @@ private:
     bool m_initialized = false;
     bool m_useDeferredRendering = true;
     bool m_wireframeMode = false;
+    bool m_enableTAA = true;
+    XMFLOAT2 m_currentJitter = { 0.0f, 0.0f };
     bool m_tKeyPressed = false;
     float m_tesselationNearDist = 200.0f;
     float m_tesselationFarDist = 1500.0f;
@@ -495,6 +507,50 @@ private:
     ComPtr<ID3DBlob> m_toneMapPSBlob;
     ComPtr<ID3DBlob> m_blurHPSBlob;
     ComPtr<ID3DBlob> m_blurVPSBlob;
+
+    // TAA resources 
+    ComPtr<ID3D12Resource> m_taaHistory[2];
+    ComPtr<ID3D12RootSignature> m_taaRootSig;
+    ComPtr<ID3D12PipelineState> m_taaPSO;
+    ComPtr<ID3DBlob> m_taaCSBlob;
+
+    ComPtr<ID3D12Resource> m_taaCB;
+    struct TAAConstants {
+        XMFLOAT4X4 gInvViewProj;
+        XMFLOAT4X4 gPrevViewProj;
+        XMFLOAT2   gResolution;
+        float      gDebugMode;
+        float      gHistoryValid;
+        XMFLOAT2  gCurrentJitter;
+        XMFLOAT2  gPrevJitter;
+        XMFLOAT2  gPad;
+    };
+    TAAConstants* m_taaCBData = nullptr;
+
+    UINT m_taaHistorySRVStart[2] = { 0, 0 };
+    UINT m_taaHistoryUAVStart = 0;
+    int m_taaCurrHistoryIndex = 0;
+    bool m_taaHistoryValid = false;
+    XMFLOAT2 m_prevJitter = { 0.0f, 0.0f };
+
+    void CreateTAAResources();
+    void CompileTAAShader();
+    void CreateTAARootSignature();
+    void CreateTAAPSO(); 
+    void ApplyTAA();
+
+    void HandleTAAKeys(const InputDevice& input);
+
+    bool m_taaDebugVelocity = false;  
+    bool m_taaHistoryHandling = true; 
+    bool m_cerberusPaused = false;   
+    bool m_yKeyPressed = false;
+    bool m_hKeyPressed = false;
+    bool m_rKeyPressed = false;
+    bool m_pKeyPressed = false;
+
+    float m_cerberusRotationAngle = 0.0f;
+    XMMATRIX m_cerberusPrevWorld = XMMatrixIdentity();
 
 	// desaturation effect parameters
     float m_mousePosX = 0.5f;
@@ -555,9 +611,147 @@ private:
     };
     MotionBlurConstants* m_motionBlurCBData = nullptr;
 
-    XMMATRIX m_prevViewProj;
+    XMMATRIX m_prevViewProj = XMMatrixIdentity();
 
     bool m_bKeyPressed = false;
     bool m_mKeyPressed = false;
     bool m_nKeyPressed = false;
+
+    static constexpr UINT BRUSH_MASK_SLOT = 700; 
+
+    void UpdateBrush(const InputDevice& input);
+    bool  m_brushEnabled = true;
+    float m_brushRadius = 40.0f;
+
+    ComPtr<ID3D12Resource> m_boxVB;
+    ComPtr<ID3D12Resource> m_boxIB;
+    D3D12_VERTEX_BUFFER_VIEW m_boxVbView{};
+    D3D12_INDEX_BUFFER_VIEW m_boxIbView{};
+    static constexpr UINT BOX_SRV_SLOT = 720;  
+    float m_boxAngle = 0.0f;
+    XMMATRIX m_boxPrevWorld = XMMatrixIdentity();
+    bool m_boxPrevValid = false;
+    XMFLOAT3 m_boxPos = { -30.0f, 12.0f, 40.0f };
+    void CreateBoxMesh();
+    void RenderBox(float totalTime);
+
+    // Atmosphere
+    struct alignas(256) AtmosphereCBData {
+        XMFLOAT3 CameraPos;    float MetersPerUnit;
+        XMFLOAT3 CamRight;     float TanHalfFovX;
+        XMFLOAT3 CamUp;        float TanHalfFovY;
+        XMFLOAT3 CamForward;   float SunIntensity;
+        XMFLOAT3 SunDir;       float MieG;            
+        XMFLOAT3 BetaRayleigh; float ObjectsEnabled;
+        XMFLOAT3 BetaMie;      float MieExtinctionScale;
+        float RayleighScaleHeight; float MieScaleHeight;
+        float JitterX; float JitterY;
+    };
+
+    void CompileAtmosphereShaders();
+    void CreateAtmospherePipeline();
+    void HandleAtmosphereKeys(float deltaTime, const InputDevice& input);
+    void UpdateAtmosphere(float deltaTime);
+    void RenderAtmospherePass();
+
+    ComPtr<ID3D12RootSignature> m_atmoRootSig;
+    ComPtr<ID3D12PipelineState> m_atmoPSO;
+    ComPtr<ID3DBlob> m_atmoVSBlob;
+    ComPtr<ID3DBlob> m_atmoPSBlob;
+    ComPtr<ID3D12Resource> m_atmoCB;
+    UINT8* m_atmoCBMapped = nullptr;
+    static constexpr UINT ATMO_GBUFFER_POSITION_SLOT = 2;   
+
+    bool  m_atmoOnObjects = true;    
+    float m_rayleighStrength = 1.0f;     
+    float m_mieStrength = 1.0f;        
+    float m_mieG = 0.76f;               
+    float m_sunIntensity = 40.0f;       
+    float m_atmoMetersPerUnit = 10.0f; 
+    float m_sunAzimuth = 0.6f;           
+    float m_sunElevation = 0.7f;        
+    int   m_atmoPreset = 0;             
+    bool  m_atmoBlending = false;    
+    float m_atmoTargetRayleigh = 1.0f;
+    float m_atmoTargetMie = 1.0f;
+    float m_atmoTargetG = 0.76f;
+
+    // DXR RT Pipeline
+    struct RTShadowCBData {         
+        XMFLOAT3 CameraPos; float NormalBias;
+        XMFLOAT3 ToLight;   float LightType;    
+        XMFLOAT3 LightPos;  float LightSize;     
+        UINT Mode; UINT Rays; UINT Frame; UINT Pad0;  
+        float TanHalfFovY; float ScreenH; float TMaxDir; float Pad1;
+    };
+    struct RTLightCBData {           
+        XMFLOAT4 LightPosType;     
+        XMFLOAT4 RadianceMode;      
+        XMFLOAT4 Params;         
+    };
+    struct RTFilterCBData {     
+        XMFLOAT2 Res; float Step; float Pad0;
+        XMFLOAT3 CameraPos; float DepthSigma;
+        float NormalPower; float Pad1[3];
+    };
+    struct RTBlas {
+        ComPtr<ID3D12Resource> result, scratch;
+        D3D12_GPU_VIRTUAL_ADDRESS addr = 0;
+    };
+
+    static constexpr UINT RT_DESC_START = 800;  
+
+    void InitRaytracing();
+    void CreateRTResources();
+    bool RTLoadShaderBytes();
+    void CreateRTPipeline();
+    void CreateRTFilterPipeline();
+    void RTBuildScene();
+    void RTBuildBlas(const std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& geoms, RTBlas& out);
+    void RTBuildTerrainMesh(std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& geoms);
+    void RTBuildTlas();
+    void RenderRTShadows();
+    void HandleRTKeys(float dt, const InputDevice& input);
+    void GetRTLightCB(RTLightCBData& out) const;
+    ComPtr<ID3D12Resource> RTCreateBuffer(UINT64 size, D3D12_HEAP_TYPE type,
+        D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state);
+
+    ComPtr<ID3D12Device5> m_rtDevice;
+    ComPtr<ID3D12GraphicsCommandList4> m_rtCmdList;
+    bool m_rtSupported = false;
+    bool m_rtSceneBuilt = false;
+    int  m_rtScratchCountdown = 0;
+
+    ComPtr<ID3D12RootSignature> m_rtGlobalRootSig;
+    ComPtr<ID3D12StateObject> m_rtStateObject;
+    ComPtr<ID3D12StateObjectProperties> m_rtStateProps;
+    ComPtr<ID3D12Resource> m_rtShaderTable;
+    std::vector<BYTE> m_rtShaderBytes;
+
+    ComPtr<ID3D12RootSignature> m_rtFilterRootSig;
+    ComPtr<ID3D12PipelineState> m_rtFilterPSO;
+    ComPtr<ID3D12Resource> m_rtRaw, m_rtFilterA, m_rtFilterB;  
+    UINT m_rtVisSlot = RT_DESC_START;                
+
+    RTBlas m_rtBlasSponza, m_rtBlasStump, m_rtBlasCerberus, m_rtBlasRock, m_rtBlasBox, m_rtBlasTerrain;
+    ComPtr<ID3D12Resource> m_rtTerrainVB, m_rtTerrainIB;
+    ComPtr<ID3D12Resource> m_rtTlas[FRAME_COUNT], m_rtTlasScratch[FRAME_COUNT], m_rtTlasInstances[FRAME_COUNT];
+    D3D12_RAYTRACING_INSTANCE_DESC* m_rtTlasInstancesMapped[FRAME_COUNT] = {};
+    UINT m_rtTlasCapacity = 0;
+
+    XMMATRIX m_rtStumpWorld = XMMatrixIdentity(); 
+    XMMATRIX m_rtCerbWorld = XMMatrixIdentity();
+    XMMATRIX m_rtBoxWorld = XMMatrixIdentity();
+
+    int   m_rtMode = 3;         
+    bool  m_rtDebugMask = false;    
+    bool  m_rtFilterOn = true;     
+    int   m_rtLightType = 0;        
+    UINT  m_rtRays = 1;               
+    float m_rtSunRadiusDeg = 1.5f;     
+    float m_rtPointRadius = 25.0f;     
+    XMFLOAT3 m_rtPointPos = { 150.0f, 300.0f, 60.0f };   
+    float m_rtPointIntensity = 8.0f;
+    UINT  m_rtFrame = 0;
+    bool  m_rtKeyLatch[8] = {};
 };

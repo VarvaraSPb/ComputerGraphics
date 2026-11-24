@@ -19,7 +19,7 @@ SamplerState gLinearSampler : register(s1);
 Texture2D<float4> gHDRColor : register(t0);
 Texture2D<float> gLuminance : register(t1);
 Texture2D<float4> gBloomTexture : register(t2);
-Texture2D<float> gDepthTexture : register(t3); 
+Texture2D<float> gDepthTexture : register(t3);
 
 cbuffer ToneMappingCB : register(b0)
 {
@@ -28,10 +28,14 @@ cbuffer ToneMappingCB : register(b0)
     float gMiddleGray;
     float gLumWhite;
     float gDeltaTime;
-    
-    float gMotionBlurIntensity; 
-    float gMotionBlurSamples; 
-    float2 gPad;
+    float gMotionBlurIntensity;
+    float gMotionBlurSamples;
+    float gMousePosX;
+    float gMousePosY;
+    float gDesatRadius;
+    float gDesatStrength;
+    float gPad1; // aspect ratio
+    float gPad2;
 };
 
 static const float3 LUMINANCE_FACTOR = float3(0.2126, 0.7152, 0.0722);
@@ -63,6 +67,15 @@ float4 BloomCombinePS(PSInput input) : SV_Target0
     finalColor *= gExposure;
     finalColor = finalColor / (finalColor + 1.0f);
     finalColor = pow(max(finalColor, 0.0f), 1.0f / 2.2f);
+    
+    float2 mousePos = float2(gMousePosX, gMousePosY);
+    float2 diff = input.texCoord - mousePos;
+    diff.x *= gPad1;
+    float d = length(diff);
+    float infl = (d < gDesatRadius) ? gDesatStrength : 0.0f;
+    float gray = dot(finalColor, float3(0.299f, 0.587f, 0.114f));
+    finalColor = lerp(finalColor, float3(gray, gray, gray), infl);
+    
     return float4(finalColor, 1.0f);
 }
 
@@ -108,12 +121,21 @@ float4 ToneMapPS(PSInput input) : SV_Target0
     hdrColor *= gExposure;
     float3 mappedColor = hdrColor / (hdrColor + 1.0f);
     mappedColor = pow(max(mappedColor, 0.0f), 1.0f / 2.2f);
+    
+    float2 mousePos = float2(gMousePosX, gMousePosY);
+    float2 diff = input.texCoord - mousePos;
+    diff.x *= gPad1;
+    float d = length(diff);
+    float infl = (d < gDesatRadius) ? gDesatStrength : 0.0f;
+    float gray = dot(mappedColor, float3(0.299f, 0.587f, 0.114f));
+    mappedColor = lerp(mappedColor, float3(gray, gray, gray), infl);
+    
     return float4(mappedColor, 1.0f);
 }
 
 cbuffer MotionBlurCB : register(b1)
 {
-    float4x4 gPrevViewProj; 
+    float4x4 gPrevViewProj;
     float4x4 gCurrViewProj;
 };
 
@@ -157,6 +179,14 @@ float4 MotionBlurPS(PSInput input) : SV_Target0
     finalColor = finalColor / (finalColor + 1.0f);
     finalColor = pow(max(finalColor, 0.0f), 1.0f / 2.2f);
     
+    float2 mousePos = float2(gMousePosX, gMousePosY);
+    float2 diff = uv - mousePos;
+    diff.x *= gPad1;
+    float d = length(diff);
+    float influence = (d < gDesatRadius) ? gDesatStrength : 0.0f;
+    float gray = dot(finalColor, float3(0.299f, 0.587f, 0.114f));
+    finalColor = lerp(finalColor, float3(gray, gray, gray), influence);
+    
     return float4(finalColor, 1.0f);
 }
 
@@ -195,6 +225,14 @@ float4 CombinedPostEffectsPS(PSInput input) : SV_Target0
     finalColor *= gExposure;
     finalColor = finalColor / (finalColor + 1.0f);
     finalColor = pow(max(finalColor, 0.0f), 1.0f / 2.2f);
+    
+    float2 mousePos = float2(gMousePosX, gMousePosY);
+    float2 diff = uv - mousePos;
+    diff.x *= gPad1;
+    float d = length(diff);
+    float influence = (d < gDesatRadius) ? gDesatStrength : 0.0f;
+    float gray = dot(finalColor, float3(0.299f, 0.587f, 0.114f));
+    finalColor = lerp(finalColor, float3(gray, gray, gray), influence);
     
     return float4(finalColor, 1.0f);
 }

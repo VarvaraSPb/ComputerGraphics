@@ -11,7 +11,12 @@ struct Material
 	XMFLOAT4 diffuse = { 0.8f, 0.8f, 0.8f, 1.f };
 	XMFLOAT4 specular = { 0.5f, 0.5f, 0.5f, 1.f };
 	float shininess = 32.f;
-	std::string diffuseTexture;
+	float roughness = 0.5f;     
+	float metallic = 0.0f;   
+	std::string diffuseTexture;   
+	std::string normalTexture;   
+	std::string metallicTexture;  
+	std::string roughnessTexture; 
 };
 struct MeshSubset
 {

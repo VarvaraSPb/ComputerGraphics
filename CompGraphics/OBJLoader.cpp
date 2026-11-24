@@ -80,6 +80,36 @@ bool ObjLoader::LoadMtl(const std::string& mtlPath, std::vector<Material>& mats)
 					tex = tex.substr(2);
 				cur.diffuseTexture = tex;
 			}
+			else if (token == "map_Bump" || token == "map_bump" || token == "bump" || token == "norm")
+			{
+				std::string tex;
+				std::getline(ss, tex);
+				tex = Trim(tex);
+				for (char& c : tex) if (c == '\\') c = '/';
+				if (tex.size() > 2 && tex[0] == '.' && tex[1] == '/')
+					tex = tex.substr(2);
+				cur.normalTexture = tex;
+			}
+			else if (token == "map_Ks" || token == "map_Pm" || token == "map_Ke")
+			{
+				std::string tex;
+				std::getline(ss, tex);
+				tex = Trim(tex);
+				for (char& c : tex) if (c == '\\') c = '/';
+				if (tex.size() > 2 && tex[0] == '.' && tex[1] == '/')
+					tex = tex.substr(2);
+				cur.metallicTexture = tex;
+			}
+			else if (token == "map_Pr" || token == "map_Ns")
+			{
+				std::string tex;
+				std::getline(ss, tex);
+				tex = Trim(tex);
+				for (char& c : tex) if (c == '\\') c = '/';
+				if (tex.size() > 2 && tex[0] == '.' && tex[1] == '/')
+					tex = tex.substr(2);
+				cur.roughnessTexture = tex;
+			}
 		}
 	}
 	return true;

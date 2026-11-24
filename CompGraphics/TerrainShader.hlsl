@@ -1,10 +1,13 @@
 cbuffer TerrainCB : register(b0)
 {
-    float4x4 gWorld; 
+    float4x4 gWorld;
     float4x4 gView;
     float4x4 gProj;
     float4x4 gWorldInvTranspose;
-
+    
+    float4x4 gPrevWorld;
+    float4x4 gPrevViewProj;
+    
     float4 gMaterialDiffuse;
     float4 gMaterialSpecular;
 
@@ -27,17 +30,23 @@ cbuffer TerrainCB : register(b0)
     float gTileCenterZ;
     float gWorldOffsetY;
     float gPad0;
+
+    float2 gJitter;
+    float2 gPad1;
+
+    float4 gBrush; 
 };
 
 Texture2D gHeightMap : register(t0);
 Texture2D gDiffuseMap : register(t1);
 Texture2D gNormalMap : register(t2);
+Texture2D gPaintMask : register(t3);
 SamplerState gSampler : register(s0);
 
 struct VSInput
 {
-    float3 Position : POSITION; 
-    float2 TexCoord : TEXCOORD; 
+    float3 Position : POSITION;
+    float2 TexCoord : TEXCOORD;
 };
 
 struct VSOutput
@@ -47,6 +56,8 @@ struct VSOutput
     float2 UV : TEXCOORD0;
     float2 WorldUV : TEXCOORD1;
     float IsCurtain : TEXCOORD2;
+    float4 CurClipPos : TEXCOORD3;
+    float4 PrevClipPos : TEXCOORD4;
 };
 
 VSOutput VSMain(VSInput vin)
@@ -72,7 +83,14 @@ VSOutput VSMain(VSInput vin)
     }
     
     float4 posV = mul(float4(posW, 1.0f), gView);
-    vout.PosH = mul(posV, gProj);
+    float4 clip = mul(posV, gProj);
+    
+    vout.CurClipPos = clip;
+    vout.PrevClipPos = mul(float4(posW, 1.0f), gPrevViewProj);
+    
+    vout.PosH = clip;
+    vout.PosH.xy += gJitter * clip.w;
+
     vout.PosW = posW;
     vout.UV = localUV;
     vout.WorldUV = worldUV;
@@ -86,33 +104,45 @@ struct PSOutput
     float4 Albedo : SV_Target0;
     float4 Normal : SV_Target1;
     float4 Position : SV_Target2;
-    float4 MatRMA : SV_Target3;
+    float2 Velocity : SV_Target3;
 };
 
 PSOutput PSMain(VSOutput pin)
 {
     PSOutput pout;
     
-    float3 baseColor = gDiffuseMap.Sample(gSampler, pin.WorldUV).rgb;
+    float3 albedo = gDiffuseMap.Sample(gSampler, pin.WorldUV).rgb * gMaterialDiffuse.rgb;
     
-    float2 detailUV = pin.PosW.xz * 0.05f;
-    float3 detailColor = gDiffuseMap.Sample(gSampler, detailUV).rgb;
+    float mask = gPaintMask.Sample(gSampler, pin.WorldUV).r;
+    float3 uvColor = float3(pin.UV.x, pin.UV.y, 0.0f);
+    albedo = lerp(albedo, uvColor, mask);
     
-    float3 albedo = lerp(baseColor, baseColor * detailColor * 1.5f, 0.35f) * gMaterialDiffuse.rgb;
+    if (gBrush.w > 0.5f)
+    {
+        float d = length(pin.PosW.xz - gBrush.xy);
+        float ringWidth = max(gBrush.z * 0.04f, 0.5f);
+        float ring = 1.0f - smoothstep(0.0f, ringWidth, abs(d - gBrush.z));
+        albedo = lerp(albedo, float3(1.0f, 1.0f, 1.0f), ring);
+    }
     
-    float texelStep = 0.0005f;
-    float hL = gHeightMap.SampleLevel(gSampler, pin.WorldUV + float2(-texelStep, 0.0f), 0).r * gHeightScale;
-    float hR = gHeightMap.SampleLevel(gSampler, pin.WorldUV + float2(texelStep, 0.0f), 0).r * gHeightScale;
-    float hD = gHeightMap.SampleLevel(gSampler, pin.WorldUV + float2(0.0f, -texelStep), 0).r * gHeightScale;
-    float hU = gHeightMap.SampleLevel(gSampler, pin.WorldUV + float2(0.0f, texelStep), 0).r * gHeightScale;
-
-    float worldStep = texelStep * 2000.0f * 2.0f;
-    float3 N = normalize(float3(hL - hR, worldStep, hD - hU));
+    float3 dp1 = ddx(pin.PosW);
+    float3 dp2 = ddy(pin.PosW);
+    float3 crossVal = cross(dp2, dp1);
+    float len = length(crossVal);
+    float3 N = (len > 1e-5f) ? (crossVal / len) : float3(0.0f, 1.0f, 0.0f);
+    if (N.y < 0.0f)
+        N = -N;
+    
+    float3 texNormal = gNormalMap.Sample(gSampler, pin.WorldUV).rgb * 2.0f - 1.0f;
+    N = normalize(N + float3(texNormal.x, 0.0f, texNormal.y) * 0.5f);
 
     pout.Albedo = float4(albedo, 1.0f);
-    pout.Normal = float4(N * 0.5f + 0.5f, 1.0f);
+    pout.Normal = float4(N * 0.5f + 0.5f, 0.85f);
     pout.Position = float4(pin.PosW, 1.0f);
-    pout.MatRMA = float4(0.85f, 0.0f, 1.0f, 1.0f);
+
+    float2 curUV = (pin.CurClipPos.xy / pin.CurClipPos.w) * float2(0.5f, -0.5f) + 0.5f;
+    float2 prevUV = (pin.PrevClipPos.xy / pin.PrevClipPos.w) * float2(0.5f, -0.5f) + 0.5f;
+    pout.Velocity = curUV - prevUV;
 
     return pout;
 }

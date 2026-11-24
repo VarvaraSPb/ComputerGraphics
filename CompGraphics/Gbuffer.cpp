@@ -24,13 +24,13 @@ bool Gbuffer::Initialize(ID3D12Device* device, ID3D12DescriptorHeap* sharedSrvHe
         return false;
 
     DXGI_FORMAT formats[COUNT] = {
-        DXGI_FORMAT_R8G8B8A8_UNORM,       // Albedo
-        DXGI_FORMAT_R16G16B16A16_FLOAT,   // Normal
-        DXGI_FORMAT_R32G32B32A32_FLOAT,   // Position
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        DXGI_FORMAT_R32G32B32A32_FLOAT,
+        DXGI_FORMAT_R16G16_FLOAT,  
     };
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
-    CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_sharedSrvHeap->GetCPUDescriptorHandleForHeapStart());
 
     for (int i = 0; i < COUNT; i++)
     {
@@ -58,11 +58,18 @@ bool Gbuffer::Initialize(ID3D12Device* device, ID3D12DescriptorHeap* sharedSrvHe
             D3D12_HEAP_FLAG_NONE,
             &texDesc,
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-            &clearValue, 
+            &clearValue,
             IID_PPV_ARGS(&m_renderTargets[i])
         ))) return false;
 
         device->CreateRenderTargetView(m_renderTargets[i].Get(), nullptr, rtvHandle);
+
+        UINT srvSlot = (i == 3) ? 12 : (UINT)i;
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(
+            m_sharedSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+            srvSlot,
+            m_srvDescriptorSize);
 
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDescTex = {};
         srvDescTex.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -72,10 +79,8 @@ bool Gbuffer::Initialize(ID3D12Device* device, ID3D12DescriptorHeap* sharedSrvHe
         device->CreateShaderResourceView(m_renderTargets[i].Get(), &srvDescTex, srvHandle);
 
         rtvHandle.Offset(1, m_rtvDescriptorSize);
-        srvHandle.Offset(1, m_srvDescriptorSize);
     }
 
-    // Depth Stencil
     D3D12_RESOURCE_DESC depthDesc = {};
     depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     depthDesc.Width = width;
